@@ -4,12 +4,15 @@ glm::mat4 SlipEntity::getMatrix()
 {
 	glm::mat4 matrix = glm::mat4(1.0f);
 	matrix = glm::translate(matrix, position);
-	matrix = glm::rotate(matrix, rotation.x, rotation);
-	matrix = glm::rotate(matrix, rotation.y, rotation);
-	matrix = glm::rotate(matrix, rotation.z, rotation);
 	matrix = glm::scale(matrix, scale);
 
-	return matrix;
+	glm::quat quaternion;
+
+	quaternion = glm::quat(1.0f, rotation.x, rotation.y, rotation.z);
+
+	glm::mat4 RotationMatrix = glm::toMat4(quaternion);
+
+	return matrix * RotationMatrix;
 }
 
 SlipEntity SlipEntity::generateEntity(std::string name, SlipModel& model, SlipMaterial& material)
