@@ -1,0 +1,143 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="SlipEngine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\glad\src\glad.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SlipShader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SlipModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="VAO.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="VBO.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SlipCamera.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SlipMesh.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SlipLight.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SlipMaterial.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SlipUI.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_demo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_draw.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_tables.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_widgets.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_impl_glfw.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_impl_opengl3.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SlipEntity.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="io.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipShader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="VAO.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="VBO.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipCamera.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipMesh.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipLight.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipMaterial.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipUI.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipEntity.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="assets\shaders\basic.frag">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\basic.vert">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\mvp.frag">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\mvp.vert">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\light.vert">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\light.frag">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\sky.frag">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\sky.vert">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\ui.frag">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\ui.vert">
+      <Filter>Resource Files</Filter>
+    </None>
+  </ItemGroup>
+</Project>
