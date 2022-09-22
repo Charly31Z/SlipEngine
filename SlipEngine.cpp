@@ -21,6 +21,16 @@
 #include "SlipUI.h"
 #include "SlipEntity.h"
 
+bool EntitiesGetter(void* data, int index, const char** out_text)
+{
+    SlipEntity* ents = (SlipEntity*)data;
+    SlipEntity& current_ent = ents[index];
+
+    *out_text = current_ent.name.c_str(); // not very safe
+
+    return true;
+}
+
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
@@ -106,10 +116,14 @@ int main()
     SlipModel ourModel("assets/models/scene2.obj");
     entities.push_back(SlipEntity::generateEntity("bsp", ourModel, simpleMat));
 
+    SlipMaterial bkMat{ shader, sun, lights };
+
     SlipModel bk("assets/models/bk.obj");
-    entities.push_back(SlipEntity::generateEntity("bk", bk, simpleMat));
+    entities.push_back(SlipEntity::generateEntity("bk", bk, bkMat));
 
     SlipUI ui{glm::vec2(1.f), "assets/textures/placeholder.png"};
+
+    int entitySelected = 0;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -118,6 +132,43 @@ int main()
         ImGui::NewFrame();
 
         ImGui::Begin("Scene");
+        ImGui::ListBox("Entities", &entitySelected, EntitiesGetter, entities.data(), entities.size());
+
+        float pos[3] = {
+            entities[entitySelected].position.x,
+            entities[entitySelected].position.y,
+            entities[entitySelected].position.z
+        };
+        float rot[3] = {
+            entities[entitySelected].rotation.x,
+            entities[entitySelected].rotation.y,
+            entities[entitySelected].rotation.z
+        };
+        float sca[3] = {
+            entities[entitySelected].scale.x,
+            entities[entitySelected].scale.y,
+            entities[entitySelected].scale.z
+        };
+
+        ImGui::InputFloat3("Translate", pos);
+        ImGui::InputFloat3("Rotate", rot);
+        ImGui::InputFloat3("Scale", sca);
+        entities[entitySelected].position = glm::vec3(pos[0], pos[1], pos[2]);
+        entities[entitySelected].rotation = glm::vec3(rot[0], rot[1], rot[2]);
+        entities[entitySelected].scale = glm::vec3(sca[0], sca[1], sca[2]);
+
+        ImGui::Text("Material");
+        float col[3] = {
+            entities[entitySelected].material->color.x,
+            entities[entitySelected].material->color.y,
+            entities[entitySelected].material->color.z
+        };
+        ImGui::ColorEdit3("Color", col);
+        entities[entitySelected].material->color = glm::vec3(col[0], col[1], col[2]);
+        entities[entitySelected].material->ambient = glm::vec3(col[0], col[1], col[2]) / glm::vec3(8.f);
+        entities[entitySelected].material->specular = glm::vec3(col[0], col[1], col[2]) / glm::vec3(6.f);
+
+        ImGui::InputFloat("Shininess", &entities[entitySelected].material->shininess);
 
         ImGui::End();
 
@@ -232,22 +283,25 @@ void processInput(GLFWwindow* window)
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-        camera.ProcessKeyboard(Camera_Movement::FORWARD, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-        camera.ProcessKeyboard(Camera_Movement::BACKWARD, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-        camera.ProcessKeyboard(Camera_Movement::LEFT, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-        camera.ProcessKeyboard(Camera_Movement::RIGHT, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
-        camera.ProcessKeyboard(Camera_Movement::DOWN, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
-        camera.ProcessKeyboard(Camera_Movement::UP, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-        camera.MovementSpeed = 30.f;
-    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_RELEASE)
-        camera.MovementSpeed = 2.5f;
+    if (canMoveMouse)
+    {
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+            camera.ProcessKeyboard(Camera_Movement::FORWARD, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+            camera.ProcessKeyboard(Camera_Movement::BACKWARD, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+            camera.ProcessKeyboard(Camera_Movement::LEFT, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+            camera.ProcessKeyboard(Camera_Movement::RIGHT, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
+            camera.ProcessKeyboard(Camera_Movement::DOWN, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
+            camera.ProcessKeyboard(Camera_Movement::UP, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+            camera.MovementSpeed = 30.f;
+        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_RELEASE)
+            camera.MovementSpeed = 2.5f;
+    }
 
     if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_2) == GLFW_PRESS)
     {
