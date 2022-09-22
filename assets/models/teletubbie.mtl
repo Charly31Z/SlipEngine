@@ -1,0 +1,33 @@
+# Blender 3.3.0 MTL File: 'faceTeletubbie_RetopoFlow_AutoSave.blend'
+# www.blender.org
+
+newmtl Skin
+Ns 1.012395
+Ka 1.000000 1.000000 1.000000
+Kd 0.800000 0.410015 0.185991
+Ks 0.190909 0.190909 0.190909
+Ke 0.000000 0.000000 0.000000
+Ni 1.450000
+d 1.000000
+illum 2
+map_Bump A:/Users/rchar/Documents/Blender Projects/FBX/teletubbie/UnrealEngine/Textures/normalTeletubbie.png
+
+newmtl eye_bake
+Ns 39.999996
+Ka 1.000000 1.000000 1.000000
+Kd 0.800000 0.800000 0.800000
+Ks 0.500000 0.500000 0.500000
+Ke 0.000000 0.000000 0.000000
+Ni 1.450000
+d 1.000000
+illum 2
+
+newmtl eye_procedural
+Ns 39.999996
+Ka 1.000000 1.000000 1.000000
+Kd 0.800000 0.800000 0.800000
+Ks 0.500000 0.500000 0.500000
+Ke 0.000000 0.000000 0.000000
+Ni 1.450000
+d 1.000000
+illum 2

@@ -8,6 +8,8 @@
 
 #include <assimp/config.h>
 
+#include <ImGuiFileBrowser.h>
+
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -31,21 +33,20 @@ bool EntitiesGetter(void* data, int index, const char** out_text)
     return true;
 }
 
+int widthS = 800, heightS = 600;
+
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void processInput(GLFWwindow* window);
-
-const unsigned int SCR_WIDTH = 800;
-const unsigned int SCR_HEIGHT = 600;
 
 // camera
 SlipCamera camera(glm::vec3(-6.f, 10.f, 15.f));
 
 bool firstMouse = true;
 bool canMoveMouse = false;
-float lastX = SCR_WIDTH / 2.0;
-float lastY = SCR_HEIGHT / 2.0;
+float lastX = widthS / 2.0;
+float lastY = heightS / 2.0;
 
 // timing
 float deltaTime = 0.0f;	// time between current frame and last frame
@@ -60,7 +61,7 @@ int main()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Programa prron", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(widthS, heightS, "Programa prron", NULL, NULL);
     if (window == NULL)
     {
         std::cout << "Failed to create GLFW window" << std::endl;
@@ -78,7 +79,7 @@ int main()
         return -1;
     }
 
-    camera.ProcessWindow(SCR_WIDTH, SCR_HEIGHT);
+    camera.ProcessWindow(widthS, heightS);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -118,12 +119,18 @@ int main()
 
     SlipMaterial bkMat{ shader, sun, lights };
 
-    SlipModel bk("assets/models/bk.obj");
-    entities.push_back(SlipEntity::generateEntity("bk", bk, bkMat));
+    SlipModel tele("assets/models/teletubbie.obj");
+    entities.push_back(SlipEntity::generateEntity("teletubbie", tele, bkMat));
 
     SlipUI ui{glm::vec2(1.f), "assets/textures/placeholder.png"};
 
     int entitySelected = 0;
+
+    imgui_addons::ImGuiFileBrowser file_dialog;
+
+    bool toolOpen;
+
+    bool dialog = false;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -131,7 +138,33 @@ int main()
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::Begin("Scene");
+        ImGui::Begin("Scene", &toolOpen, ImGuiWindowFlags_MenuBar);
+        if (ImGui::BeginMenuBar())
+        {
+            if (ImGui::BeginMenu("File"))
+            {
+                if (ImGui::MenuItem("Import model..", "Ctrl+I")) { dialog = true; }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenuBar();
+        }
+
+        if (dialog)
+            ImGui::OpenPopup("Open File");
+
+        if (file_dialog.showFileDialog("Open File", imgui_addons::ImGuiFileBrowser::DialogMode::OPEN, ImVec2(700, 310), ".obj,.fbx"))
+        {
+            std::cout << file_dialog.selected_fn << std::endl;      // The name of the selected file or directory in case of Select Directory dialog mode
+            std::cout << file_dialog.selected_path << std::endl;    // The absolute path to the selected file
+
+            std::cout << file_dialog.selected_path.substr(file_dialog.selected_path.find_last_of("/", file_dialog.selected_path.length() - 2)) << std::endl;
+
+            SlipMaterial importedMat{shader, sun, lights};
+            SlipModel imported{ file_dialog.selected_path };
+            entities.push_back(SlipEntity::generateEntity("imported", imported, importedMat));
+            dialog = false;
+        }
+
         ImGui::ListBox("Entities", &entitySelected, EntitiesGetter, entities.data(), entities.size());
 
         float pos[3] = {
@@ -185,7 +218,7 @@ int main()
         float greenValue = sin(timeValue) / 2.0f + 0.5f;
         shader.setFloat("ourColorGreen", greenValue);*/
 
-        camera.ProcessWindow(SCR_WIDTH, SCR_HEIGHT);
+        camera.ProcessWindow(widthS, heightS);
 
         //glm::mat4 projection = camera.GetProjectionMatrix();
         //glm::mat4 view = camera.GetViewMatrix();
@@ -275,7 +308,10 @@ int main()
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
+    widthS = width;
+    heightS = height;
     glViewport(0, 0, width, height);
+    glfwSetWindowAspectRatio(window, widthS, heightS);
 }
 
 void processInput(GLFWwindow* window)

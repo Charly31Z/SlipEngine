@@ -76,7 +76,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;A:\dev\Libraries\imgui\FileBrowser;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -93,7 +93,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;A:\dev\Libraries\imgui\FileBrowser;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -108,9 +108,9 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_WIN32;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_WIN32;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;A:\dev\Libraries\imgui\FileBrowser;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -127,7 +127,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_WIN32;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;A:\dev\Libraries\imgui\FileBrowser;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -140,6 +140,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\glad\src\glad.c" />
+    <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\FileBrowser\ImGuiFileBrowser.cpp" />
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui.cpp" />
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_demo.cpp" />
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_draw.cpp" />

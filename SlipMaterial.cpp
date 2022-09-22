@@ -15,7 +15,6 @@ SlipMaterial::SlipMaterial(SlipShader& shader, SlipLight& sunLight, std::vector<
 
 void SlipMaterial::bind(SlipCamera& camera, glm::mat4 &model)
 {
-    printf("\nUsando shader: %u", shader.ID);
     shader.use();
 
     shader.setVec3("material.ambient", ambient);
