@@ -149,6 +149,7 @@
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_tables.cpp" />
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_widgets.cpp" />
     <ClCompile Include="SlipCamera.cpp" />
+    <ClCompile Include="SlipEditor.cpp" />
     <ClCompile Include="SlipEngine.cpp" />
     <ClCompile Include="SlipEntity.cpp" />
     <ClCompile Include="SlipLight.cpp" />
@@ -163,6 +164,7 @@
   <ItemGroup>
     <ClInclude Include="io.h" />
     <ClInclude Include="SlipCamera.h" />
+    <ClInclude Include="SlipEditor.h" />
     <ClInclude Include="SlipEntity.h" />
     <ClInclude Include="SlipLight.h" />
     <ClInclude Include="SlipMaterial.h" />

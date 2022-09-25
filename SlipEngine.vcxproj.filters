@@ -75,6 +75,9 @@
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\FileBrowser\ImGuiFileBrowser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SlipEditor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="io.h">
@@ -108,6 +111,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SlipEntity.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SlipEditor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

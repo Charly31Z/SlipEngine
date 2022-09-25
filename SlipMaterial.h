@@ -17,11 +17,12 @@ public:
 	glm::vec3 specular = glm::vec3(0.16f);
 	float shininess = 3;
 
-	SlipLight& sunLight;
+	SlipLight sunLight;
 	std::vector<SlipLight> lights;
-	SlipShader& shader;
+	SlipShader shader;
 
 	static SlipMaterial generateMaterial(std::string code, SlipLight& sunLight, std::vector<SlipLight> &lights);
+	static SlipMaterial generateMaterial2(SlipShader code, SlipLight sunLight, std::vector<SlipLight> lights);
 
 	SlipMaterial(SlipShader &shader, SlipLight& sunLight, std::vector<SlipLight> &lights);
 

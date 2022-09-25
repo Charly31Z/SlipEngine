@@ -49,6 +49,7 @@ public:
 
     glm::mat4 GetViewMatrix();
     glm::mat4 GetProjectionMatrix();
+    glm::mat4 GetOrthographicMatrix();
 
     void ProcessKeyboard(Camera_Movement direction, float deltaTime);
     void ProcessWindow(float width, float height);

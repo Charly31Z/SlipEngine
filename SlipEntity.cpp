@@ -27,15 +27,14 @@ SlipEntity SlipEntity::generateEntity2(std::string name, SlipModel model, SlipMa
 	return ent;
 }
 
-SlipEntity::SlipEntity(std::string name, SlipModel& model, SlipMaterial& material) : name(name), model(model)
+SlipEntity::SlipEntity(std::string name, SlipModel& model, SlipMaterial& material) : name(name), model(model), material(material)
 {
-	this->material = &material;
 }
 
 void SlipEntity::draw(SlipCamera& camera)
 {
 	glm::mat4 modelMat = getMatrix();
-	material->bind(camera, modelMat);
+	material.bind(camera, modelMat);
 
-	model.Draw(material->shader);
+	model.Draw(material.shader);
 }

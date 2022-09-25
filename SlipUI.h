@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "SlipCamera.h"
 #include "SlipShader.h"
 
 class SlipUI
@@ -29,23 +30,25 @@ private:
 		glm::vec2 texCoords;
 	};
 
+	glm::vec2 position;
+	glm::vec2 scale{1.f};
+
 	std::vector<Vertex> vertices;
 	std::vector<GLuint> indices;
 	Texture texture;
 
 	SlipShader shader{ "assets/shaders/ui.vert", "assets/shaders/ui.frag" };
 
+	glm::mat4 getModelMatrix();
+
 	void setupMesh();
 	void setupTexture();
-
-	glm::mat4 model;
-	glm::mat4 mvp;
 
 	GLuint VAO, VBO, EBO;
 public:
 	SlipUI(glm::vec2 position, std::string texturePath);
 
-	void draw(glm::mat4 ortho);
+	void draw(SlipCamera& camera);
 };
 
 #endif // !SLIP_UI_H

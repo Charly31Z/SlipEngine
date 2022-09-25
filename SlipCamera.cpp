@@ -19,6 +19,11 @@ glm::mat4 SlipCamera::GetProjectionMatrix()
     return glm::perspective(glm::radians(Zoom), (float)width / (float)height, 0.1f, 50000.0f);
 }
 
+glm::mat4 SlipCamera::GetOrthographicMatrix()
+{
+    return glm::ortho(0.0f, (float)width, 0.0f, (float)height);
+}
+
 void SlipCamera::ProcessKeyboard(Camera_Movement direction, float deltaTime)
 {
     float velocity = MovementSpeed * deltaTime;

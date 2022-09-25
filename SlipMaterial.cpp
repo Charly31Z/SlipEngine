@@ -9,6 +9,11 @@ SlipMaterial SlipMaterial::generateMaterial(std::string code, SlipLight& sunLigh
     return SlipMaterial(s, sunLight, lights);
 }
 
+SlipMaterial SlipMaterial::generateMaterial2(SlipShader shader, SlipLight sunLight, std::vector<SlipLight> lights)
+{
+    return SlipMaterial(shader, sunLight, lights);
+}
+
 SlipMaterial::SlipMaterial(SlipShader& shader, SlipLight& sunLight, std::vector<SlipLight>& lights) : shader(shader), sunLight(sunLight), lights(lights)
 {
 }

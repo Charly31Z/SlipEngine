@@ -2,6 +2,15 @@
 
 #include "stb_image.h"
 
+glm::mat4 SlipUI::getModelMatrix()
+{
+    glm::mat4 model = glm::mat4(1.0f);
+    model = glm::translate(model, glm::vec3(position, 0.0f));
+    model = glm::scale(model, glm::vec3(scale, 0.0f));
+
+    return model;
+}
+
 void SlipUI::setupMesh()
 {
     glGenVertexArrays(1, &VAO);
@@ -72,7 +81,7 @@ void SlipUI::setupTexture()
     shader.setInt("texture1", 0);
 }
 
-SlipUI::SlipUI(glm::vec2 position, std::string texturePath)
+SlipUI::SlipUI(glm::vec2 position, std::string texturePath) : position(position)
 {
 	vertices = {
 		Vertex{glm::vec3( 0.5f,  0.5f, 0.0f), glm::vec2(1.0f, 1.0f)},
@@ -88,22 +97,19 @@ SlipUI::SlipUI(glm::vec2 position, std::string texturePath)
 
     texture.path = texturePath;
 
-    model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(position, 0.0f));
-
 	setupMesh();
     setupTexture();
 }
 
-void SlipUI::draw(glm::mat4 ortho)
+void SlipUI::draw(SlipCamera& camera)
 {
     shader.use();
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture.id);
 
-    mvp = ortho * model;
-    shader.setMat4("mvp", mvp);
+    glm::mat4 model = getModelMatrix();
+    shader.setMat4("model", model);
 
     glBindVertexArray(VAO);
     glDrawElements(GL_TRIANGLES, static_cast<unsigned int>(indices.size()), GL_UNSIGNED_INT, 0);
