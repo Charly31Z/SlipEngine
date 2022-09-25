@@ -19,10 +19,11 @@ public:
 
 	glm::mat4 getMatrix();
 
-	SlipModel* model;
+	SlipModel model;
 	SlipMaterial* material;
 
 	static SlipEntity generateEntity(std::string name, SlipModel& model, SlipMaterial& material);
+	static SlipEntity generateEntity2(std::string name, SlipModel model, SlipMaterial material);
 
 	SlipEntity(std::string name, SlipModel &model, SlipMaterial& material);
 

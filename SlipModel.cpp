@@ -3,7 +3,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-SlipModel::SlipModel(std::string const& filepath, bool gamma) : gammaCorrection(gamma)
+SlipModel::SlipModel(std::string const filepath, bool gamma) : gammaCorrection(gamma)
 {
     loadModel(filepath);
 }
@@ -14,7 +14,7 @@ void SlipModel::Draw(SlipShader& shader)
         meshes[i].Draw(shader);
 }
 
-void SlipModel::loadModel(std::string const& filepath)
+void SlipModel::loadModel(std::string const filepath)
 {
     Assimp::Importer importer;
     const aiScene* scene = importer.ReadFile(filepath, aiProcess_Triangulate | aiProcess_FlipUVs);

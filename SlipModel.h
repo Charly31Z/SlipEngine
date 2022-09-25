@@ -20,9 +20,7 @@ class SlipModel
 {
 private:
 
-	GLuint VAO, VBO, EBO;
-
-    void loadModel(std::string const& filepath);
+    void loadModel(std::string const filepath);
     void processNode(aiNode* node, const aiScene* scene);
     SlipMesh processMesh(aiMesh* mesh, const aiScene* scene);
     std::vector<Texture> loadMaterialTextures(aiMaterial* mat, aiTextureType type, std::string typeName);
@@ -34,7 +32,7 @@ public:
     bool gammaCorrection;
 
     // constructor, expects a filepath to a 3D model.
-    SlipModel(std::string const& filepath, bool gamma = false);
+    SlipModel(std::string const filepath, bool gamma = false);
 
     // draws the model, and thus all its meshes
     void Draw(SlipShader& shader);

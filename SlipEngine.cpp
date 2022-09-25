@@ -15,6 +15,9 @@
 #include <imgui_impl_opengl3.h>
 
 #include <iostream>
+#include <fstream>
+
+#include "io.h"
 #include "SlipCamera.h"
 #include "SlipShader.h"
 #include "SlipModel.h"
@@ -130,7 +133,8 @@ int main()
 
     bool toolOpen;
 
-    bool dialog = false;
+    bool dialogOpen = false;
+    bool dialogSave = false;
 
     while (!glfwWindowShouldClose(window))
     {
@@ -143,26 +147,57 @@ int main()
         {
             if (ImGui::BeginMenu("File"))
             {
-                if (ImGui::MenuItem("Import model..", "Ctrl+I")) { dialog = true; }
+                if (ImGui::MenuItem("Import model..", "Ctrl+I")) { dialogOpen = true; }
+                if (ImGui::MenuItem("Export model..", "Ctrl+O")) { dialogSave = true; }
                 ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
         }
 
-        if (dialog)
+        if (dialogOpen)
             ImGui::OpenPopup("Open File");
+        if (dialogSave)
+            ImGui::OpenPopup("Export File");
 
         if (file_dialog.showFileDialog("Open File", imgui_addons::ImGuiFileBrowser::DialogMode::OPEN, ImVec2(700, 310), ".obj,.fbx"))
         {
             std::cout << file_dialog.selected_fn << std::endl;      // The name of the selected file or directory in case of Select Directory dialog mode
             std::cout << file_dialog.selected_path << std::endl;    // The absolute path to the selected file
 
-            std::cout << file_dialog.selected_path.substr(file_dialog.selected_path.find_last_of("/", file_dialog.selected_path.length() - 2)) << std::endl;
+            entities.push_back(SlipEntity::generateEntity2("imported", SlipModel{"assets/models/" + file_dialog.selected_fn}, SlipMaterial{ shader, sun, lights }));
+            dialogOpen = false;
+        }
+        if (file_dialog.showFileDialog("Export File", imgui_addons::ImGuiFileBrowser::DialogMode::SAVE, ImVec2(700, 310), ".model_cache"))
+        {
+            std::cout << file_dialog.selected_fn << std::endl;      // The name of the selected file or directory in case of Select Directory dialog mode
+            std::cout << file_dialog.selected_path << std::endl;    // The absolute path to the selected file
+            std::cout << file_dialog.ext << std::endl;              // Access ext separately (For SAVE mode)
+            //Do writing of files based on extension here
 
-            SlipMaterial importedMat{shader, sun, lights};
-            SlipModel imported{ file_dialog.selected_path };
-            entities.push_back(SlipEntity::generateEntity("imported", imported, importedMat));
-            dialog = false;
+            std::ofstream o(file_dialog.selected_path + file_dialog.ext, std::ios::binary);
+
+            int sizeVertices = entities[entitySelected].model.meshes[0].vertices.size();
+            int sizeIndices = entities[entitySelected].model.meshes[0].indices.size();
+            IO::write(o, sizeVertices);
+            IO::write(o, sizeIndices);
+
+            for (int i = 0; i < sizeVertices; i++)
+            {
+                float* positions = glm::value_ptr(entities[entitySelected].model.meshes[0].vertices[i].Position);
+                float* normals = glm::value_ptr(entities[entitySelected].model.meshes[0].vertices[i].Normal);
+                float* texcoords = glm::value_ptr(entities[entitySelected].model.meshes[0].vertices[i].TexCoords);
+                IO::write(o, positions);
+                IO::write(o, normals);
+                IO::write(o, texcoords);
+            }
+
+            for (int i = 0; i < sizeIndices; i++)
+            {
+                IO::write(o, entities[entitySelected].model.meshes[0].indices[i]);
+            }
+
+            o.close();
+            dialogSave = false;
         }
 
         ImGui::ListBox("Entities", &entitySelected, EntitiesGetter, entities.data(), entities.size());
@@ -230,7 +265,7 @@ int main()
 
         for (auto& entity : entities)
         {
-            if (entity.model != NULL && entity.material != NULL)
+            if (entity.material != NULL)
             {
                 entity.draw(camera);
             }

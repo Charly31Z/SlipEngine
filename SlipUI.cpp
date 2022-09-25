@@ -40,7 +40,7 @@ void SlipUI::setupTexture()
     unsigned char* data = stbi_load(texture.path.c_str(), &width, &height, &nrComponents, 0);
     if (data)
     {
-        printf("Loaded texture: %s", texture.path.c_str());
+        printf("Loaded texture: %s\n", texture.path.c_str());
 
         GLenum format;
         if (nrComponents == 1)
@@ -63,7 +63,7 @@ void SlipUI::setupTexture()
     }
     else
     {
-        printf("Texture failed to load at path: %s", texture.path.c_str());
+        printf("Texture failed to load at path: %s\n", texture.path.c_str());
         stbi_image_free(data);
     }
 
