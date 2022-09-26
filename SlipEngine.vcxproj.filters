@@ -78,6 +78,9 @@
     <ClCompile Include="SlipEditor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SlipFrameBuffer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="io.h">
@@ -116,6 +119,9 @@
     <ClInclude Include="SlipEditor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="SlipFrameBuffer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="assets\shaders\basic.frag">
@@ -146,6 +152,12 @@
       <Filter>Resource Files</Filter>
     </None>
     <None Include="assets\shaders\ui.vert">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\screen.frag">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="assets\shaders\screen.vert">
       <Filter>Resource Files</Filter>
     </None>
   </ItemGroup>

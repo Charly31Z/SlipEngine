@@ -20,16 +20,14 @@
 #include "SlipMaterial.h"
 #include "SlipUI.h"
 #include "SlipEntity.h"
+#include "SlipFrameBuffer.h"
 
-int widthS = 800, heightS = 600;
+int widthS = 1280, heightS = 720;
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void processInput(GLFWwindow* window);
-
-// editor
-SlipEditor editor;
 
 // camera
 SlipCamera camera(glm::vec3(-6.f, 10.f, 15.f));
@@ -44,6 +42,10 @@ float deltaTime = 0.0f;	// time between current frame and last frame
 float lastFrame = 0.0f;
 
 std::vector<SlipEntity> entities;
+std::vector<SlipUI> uis;
+
+// editor
+SlipEditor editor{entities, uis, widthS, heightS};
 
 int main()
 {
@@ -60,6 +62,7 @@ int main()
         return -1;
     }
     glfwMakeContextCurrent(window);
+    glfwSetWindowAspectRatio(window, widthS, heightS);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetScrollCallback(window, scroll_callback);
@@ -86,6 +89,7 @@ int main()
     lights.push_back(light);
 
     SlipShader skyShader("assets/shaders/sky.vert", "assets/shaders/sky.frag");
+    SlipShader bspShader("assets/shaders/mvp.vert", "assets/shaders/mvp.frag");
     SlipShader shader("assets/shaders/mvp.vert", "assets/shaders/mvp.frag");
 
     SlipMaterial skyMat{skyShader, sun, lights};
@@ -93,29 +97,42 @@ int main()
     SlipModel sky("assets/models/sky.obj");
     entities.push_back(SlipEntity::generateEntity("sky", sky, skyMat));
 
-    SlipMaterial simpleMat{shader, sun, lights };
+    SlipMaterial simpleMat{bspShader, sun, lights };
 
-    SlipModel ourModel("assets/models/scene2.obj");
+    SlipModel ourModel("assets/models/scene.obj");
     entities.push_back(SlipEntity::generateEntity("bsp", ourModel, simpleMat));
 
     SlipMaterial bkMat{ shader, sun, lights };
 
     SlipModel tele("assets/models/teletubbie.obj");
-    entities.push_back(SlipEntity::generateEntity("teletubbie", tele, bkMat));
 
-    SlipUI ui{glm::vec2(0.f), "assets/textures/placeholder.png"};
+    SlipEntity entTele{"teletubbie", tele, bkMat};
+    entTele.position.y = -3.f;
+    entities.push_back(entTele);
+
+    SlipUI testUi{"placeholder", camera, glm::vec2(0.f), "assets/textures/placeholder.png"};
+    uis.push_back(testUi);
+
+    SlipFrameBuffer framebuffer{widthS, heightS};
 
     while (!glfwWindowShouldClose(window))
     {
         editor.startRender();
-        editor.renderHierarchy(entities, shader, sun, lights);
-        editor.renderProperties(entities);
+        editor.renderHierarchy(shader, sun, lights);
+        editor.renderProperties();
+        editor.renderGame(framebuffer);
 
         float currentFrame = static_cast<float>(glfwGetTime());
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
         processInput(window);
+
+        framebuffer.bind();
+
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
 
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -133,11 +150,16 @@ int main()
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
 
-        ui.draw(camera);
+        for (auto& ui : uis)
+        {
+            ui.draw();
+        }
 
-        glDepthMask(GL_TRUE);
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
+        framebuffer.unbind();
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        //framebuffer.draw();
 
         editor.endRender();
 
@@ -154,8 +176,8 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
     widthS = width;
     heightS = height;
+    glfwSetWindowSize(window, width, height);
     glViewport(0, 0, width, height);
-    glfwSetWindowAspectRatio(window, widthS, heightS);
 }
 
 void processInput(GLFWwindow* window)

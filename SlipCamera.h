@@ -45,6 +45,8 @@ public:
     float MouseSensitivity;
     float Zoom;
 
+    float width, height;
+
     SlipCamera(glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f), float yaw = YAW, float pitch = PITCH);
 
     glm::mat4 GetViewMatrix();
@@ -57,8 +59,6 @@ public:
     void ProcessMouseScroll(float yoffset);
 private:
     void updateCameraVectors();
-
-    float width, height;
 };
 
 #endif

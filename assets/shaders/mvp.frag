@@ -38,12 +38,16 @@ uniform SunLight sunLight;
 uniform Material material;
 uniform Light lights[MAX_POINT_LIGHTS];
 
+uniform sampler2D texture1;
+
 vec3 CalcSunLight(SunLight light, vec3 normal, vec3 viewDir);
 vec3 CalcPointLight(Light light, vec3 normal, vec3 fragPos, vec3 viewDir);
 vec3 CalcSpotLight(Light light, vec3 normal, vec3 fragPos, vec3 viewDir);
 
 void main()
 {
+    vec3 txtColor = texture(texture1, TexCoord).rgb;
+
     vec3 norm = normalize(Normal);
     vec3 viewDir = normalize(viewPos - FragPos);
 
@@ -52,7 +56,7 @@ void main()
     for(int i = 0; i < 1; i++)
         result += CalcPointLight(lights[i], norm, FragPos, viewDir);
 
-    vec3 color = result;
+    vec3 color = result * txtColor;
     float gamma = 2.2;
     color = pow(color, vec3(1.0/gamma));
     FragColor = vec4(color, 1.0);

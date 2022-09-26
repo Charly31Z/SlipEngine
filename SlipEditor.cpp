@@ -10,6 +10,10 @@ bool EntitiesGetter(void* data, int index, const char** out_text)
     return true;
 }
 
+SlipEditor::SlipEditor(std::vector<SlipEntity>& entities, std::vector<SlipUI>& uis, int& width, int& height) : entities(entities), uis(uis), width(width), height(height)
+{
+}
+
 void SlipEditor::init(GLFWwindow* window)
 {
     //SETUP IMGUI
@@ -31,9 +35,12 @@ void SlipEditor::startRender()
     ImGui::NewFrame();
 }
 
-void SlipEditor::renderHierarchy(std::vector<SlipEntity>& entities, SlipShader& shader, SlipLight& sun, std::vector<SlipLight>& lights)
+void SlipEditor::renderHierarchy(SlipShader& shader, SlipLight& sun, std::vector<SlipLight>& lights)
 {
-    ImGui::Begin("Scene", &hierarchy, ImGuiWindowFlags_MenuBar);
+    ImGui::Begin("Scene", &hierarchy, ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+    ImGui::SetWindowPos(ImVec2(0,0));
+    ImGui::SetWindowSize(ImVec2(width/4.5, height/1.5));
+
     if (ImGui::BeginMenuBar())
     {
         if (ImGui::BeginMenu("File"))
@@ -106,6 +113,34 @@ void SlipEditor::renderHierarchy(std::vector<SlipEntity>& entities, SlipShader& 
 
             if (ImGui::IsItemClicked()) {
                 entitySelected = i;
+                prop = property_type::ENTITY;
+            }
+
+            if (node_open)
+            {
+                ImGui::TreePop();
+            }
+        }
+        ImGui::TreePop();
+        ImGui::PopStyleVar();
+    }
+
+    if (ImGui::TreeNode("User Interfaces"))
+    {
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5, 5));
+        for (int i = 0; i < uis.size(); i++)
+        {
+            ImGuiTreeNodeFlags node_flags;
+
+            if (uiSelected == i)
+                node_flags = ImGuiTreeNodeFlags_Selected | ImGuiTreeNodeFlags_Leaf;
+            else
+                node_flags = ImGuiTreeNodeFlags_Leaf;
+            bool node_open = ImGui::TreeNodeEx((void*)(intptr_t)i, node_flags, uis[i].name.c_str());
+
+            if (ImGui::IsItemClicked()) {
+                uiSelected = i;
+                prop = property_type::UI;
             }
 
             if (node_open)
@@ -120,45 +155,88 @@ void SlipEditor::renderHierarchy(std::vector<SlipEntity>& entities, SlipShader& 
     ImGui::End();
 }
 
-void SlipEditor::renderProperties(std::vector<SlipEntity>& entities)
+void SlipEditor::renderProperties()
 {
-    ImGui::Begin("Properties", &properties);
+    ImGui::Begin("Properties", &properties, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+    ImGui::SetWindowPos(ImVec2(0, height/1.5));
+    ImGui::SetWindowSize(ImVec2(width / 4.5, height/3));
 
-    float pos[3] = {
-        entities[entitySelected].position.x,
-        entities[entitySelected].position.y,
-        entities[entitySelected].position.z
-    };
-    float rot[3] = {
-        entities[entitySelected].rotation.x,
-        entities[entitySelected].rotation.y,
-        entities[entitySelected].rotation.z
-    };
-    float sca[3] = {
-        entities[entitySelected].scale.x,
-        entities[entitySelected].scale.y,
-        entities[entitySelected].scale.z
-    };
+    switch (prop)
+    {
+    case SlipEditor::ENTITY:
+        {
+            float pos[3] = {
+                entities[entitySelected].position.x,
+                entities[entitySelected].position.y,
+                entities[entitySelected].position.z
+            };
+            float rot[3] = {
+                entities[entitySelected].rotation.x,
+                entities[entitySelected].rotation.y,
+                entities[entitySelected].rotation.z
+            };
+            float sca[3] = {
+                entities[entitySelected].scale.x,
+                entities[entitySelected].scale.y,
+                entities[entitySelected].scale.z
+            };
 
-    ImGui::InputFloat3("Translate", pos);
-    ImGui::InputFloat3("Rotate", rot);
-    ImGui::InputFloat3("Scale", sca);
-    entities[entitySelected].position = glm::vec3(pos[0], pos[1], pos[2]);
-    entities[entitySelected].rotation = glm::vec3(rot[0], rot[1], rot[2]);
-    entities[entitySelected].scale = glm::vec3(sca[0], sca[1], sca[2]);
+            ImGui::InputFloat3("Translate", pos);
+            ImGui::InputFloat3("Rotate", rot);
+            ImGui::InputFloat3("Scale", sca);
+            entities[entitySelected].position = glm::vec3(pos[0], pos[1], pos[2]);
+            entities[entitySelected].rotation = glm::vec3(rot[0], rot[1], rot[2]);
+            entities[entitySelected].scale = glm::vec3(sca[0], sca[1], sca[2]);
 
-    ImGui::Text("Material");
-    float col[3] = {
-        entities[entitySelected].material.color.x,
-        entities[entitySelected].material.color.y,
-        entities[entitySelected].material.color.z
-    };
-    ImGui::ColorEdit3("Color", col);
-    entities[entitySelected].material.color = glm::vec3(col[0], col[1], col[2]);
-    entities[entitySelected].material.ambient = glm::vec3(col[0], col[1], col[2]) / glm::vec3(8.f);
-    entities[entitySelected].material.specular = glm::vec3(col[0], col[1], col[2]) / glm::vec3(6.f);
+            ImGui::Text("Material");
+            float col[3] = {
+                entities[entitySelected].material.color.x,
+                entities[entitySelected].material.color.y,
+                entities[entitySelected].material.color.z
+            };
+            ImGui::ColorEdit3("Color", col);
+            entities[entitySelected].material.color = glm::vec3(col[0], col[1], col[2]);
+            entities[entitySelected].material.ambient = glm::vec3(col[0], col[1], col[2]) / glm::vec3(8.f);
+            entities[entitySelected].material.specular = glm::vec3(col[0], col[1], col[2]) / glm::vec3(6.f);
 
-    ImGui::InputFloat("Shininess", &entities[entitySelected].material.shininess);
+            ImGui::InputFloat("Shininess", &entities[entitySelected].material.shininess);
+        }
+        break;
+    case SlipEditor::UI:
+        {
+            float pos[2] = {
+                uis[uiSelected].position.x,
+                uis[uiSelected].position.y
+            };
+            /*float rot[2] = {
+                entities[entitySelected].rotation.x,
+                entities[entitySelected].rotation.y
+            };*/
+            float sca[2] = {
+                uis[uiSelected].scale.x,
+                uis[uiSelected].scale.y
+            };
+
+            ImGui::InputFloat2("Translate", pos);
+            //ImGui::SliderFloat2("Rotate", rot, 0.f, 3.f);
+            ImGui::SliderFloat2("Scale", sca, 0.f, 3.f);
+            uis[uiSelected].position = glm::vec2(pos[0], pos[1]);
+            //uis[uiSelected].rotation = glm::vec3(rot[0], rot[1], rot[2]);
+            uis[uiSelected].scale = glm::vec2(sca[0], sca[1]);
+        }
+        break;
+    }
+
+    ImGui::End();
+}
+
+void SlipEditor::renderGame(SlipFrameBuffer& frameBuffer)
+{
+    ImGui::Begin("Game", &game, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+    ImGui::SetWindowPos(ImVec2(width / 4.5, 0));
+    ImGui::SetWindowSize(ImVec2(width / 1.8, height / 1.5));
+
+    ImGui::Image((void*)(intptr_t)frameBuffer.textureColorBuffer, ImVec2(width/2, height/2), ImVec2(0, 0), ImVec2(1, -1));
 
     ImGui::End();
 }

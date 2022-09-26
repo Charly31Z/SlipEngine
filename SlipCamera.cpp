@@ -21,7 +21,8 @@ glm::mat4 SlipCamera::GetProjectionMatrix()
 
 glm::mat4 SlipCamera::GetOrthographicMatrix()
 {
-    return glm::ortho(0.0f, (float)width, 0.0f, (float)height);
+    float aspect = (float)width / height;
+    return glm::ortho(-aspect, aspect, -1.0f, 1.0f);
 }
 
 void SlipCamera::ProcessKeyboard(Camera_Movement direction, float deltaTime)

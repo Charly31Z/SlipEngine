@@ -152,6 +152,7 @@
     <ClCompile Include="SlipEditor.cpp" />
     <ClCompile Include="SlipEngine.cpp" />
     <ClCompile Include="SlipEntity.cpp" />
+    <ClCompile Include="SlipFrameBuffer.cpp" />
     <ClCompile Include="SlipLight.cpp" />
     <ClCompile Include="SlipMaterial.cpp" />
     <ClCompile Include="SlipMesh.cpp" />
@@ -166,6 +167,7 @@
     <ClInclude Include="SlipCamera.h" />
     <ClInclude Include="SlipEditor.h" />
     <ClInclude Include="SlipEntity.h" />
+    <ClInclude Include="SlipFrameBuffer.h" />
     <ClInclude Include="SlipLight.h" />
     <ClInclude Include="SlipMaterial.h" />
     <ClInclude Include="SlipMesh.h" />
@@ -182,6 +184,8 @@
     <None Include="assets\shaders\light.vert" />
     <None Include="assets\shaders\mvp.frag" />
     <None Include="assets\shaders\mvp.vert" />
+    <None Include="assets\shaders\screen.frag" />
+    <None Include="assets\shaders\screen.vert" />
     <None Include="assets\shaders\sky.frag" />
     <None Include="assets\shaders\sky.vert" />
     <None Include="assets\shaders\ui.frag" />

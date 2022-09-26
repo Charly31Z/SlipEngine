@@ -30,13 +30,11 @@ private:
 		glm::vec2 texCoords;
 	};
 
-	glm::vec2 position;
-	glm::vec2 scale{1.f};
-
 	std::vector<Vertex> vertices;
 	std::vector<GLuint> indices;
 	Texture texture;
 
+	SlipCamera& camera;
 	SlipShader shader{ "assets/shaders/ui.vert", "assets/shaders/ui.frag" };
 
 	glm::mat4 getModelMatrix();
@@ -46,9 +44,14 @@ private:
 
 	GLuint VAO, VBO, EBO;
 public:
-	SlipUI(glm::vec2 position, std::string texturePath);
+	std::string name;
 
-	void draw(SlipCamera& camera);
+	glm::vec2 position;
+	glm::vec2 scale{ 1.f };
+
+	SlipUI(std::string name, SlipCamera& camera, glm::vec2 position, std::string texturePath);
+
+	void draw();
 };
 
 #endif // !SLIP_UI_H
