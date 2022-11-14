@@ -9,6 +9,8 @@
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
 
+#include "SlipDebug.h"
+
 // Defines several possible options for camera movement. Used as abstraction to stay away from window-system specific input methods
 enum Camera_Movement {
     FORWARD,
@@ -45,9 +47,16 @@ public:
     float MouseSensitivity;
     float Zoom;
 
+    float dt;
+
+    float near = 0.1f;
+    float far = 50000.0f;
+
     float width, height;
 
     SlipCamera(glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f), float yaw = YAW, float pitch = PITCH);
+
+    void drawDebug();
 
     glm::mat4 GetViewMatrix();
     glm::mat4 GetProjectionMatrix();

@@ -2,6 +2,7 @@
 
 void SlipFrameBuffer::initMesh()
 {
+
 	glGenVertexArrays(1, &VAO);
 	glGenBuffers(1, &VBO);
 	glGenBuffers(1, &EBO);
@@ -29,7 +30,7 @@ void SlipFrameBuffer::initMesh()
 	glBindVertexArray(0);
 }
 
-void SlipFrameBuffer::initFramebuffer()
+void SlipFrameBuffer::initFramebuffer(int& width, int& height)
 {
 	glGenFramebuffers(1, &fbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -51,12 +52,12 @@ void SlipFrameBuffer::initFramebuffer()
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-	shader.use();
+	shader->use();
 
-	shader.setInt("screenTexture", 0);
+	shader->setInt("screenTexture", 0);
 }
 
-SlipFrameBuffer::SlipFrameBuffer(int& width, int& height) : width(width), height(height)
+SlipFrameBuffer::SlipFrameBuffer()
 {
 	vertices = {
 		Vertex{glm::vec2(1.f,  1.f), glm::vec2(1.0f, 1.0f)},
@@ -69,9 +70,36 @@ SlipFrameBuffer::SlipFrameBuffer(int& width, int& height) : width(width), height
 		0, 1, 3,
 		1, 2, 3
 	};
+}
+
+void SlipFrameBuffer::init(int& width, int& height)
+{
+	SlipShader s{"assets/shaders/screen.vert", "assets/shaders/screen.frag"};
+	shader = &s;
 
 	initMesh();
-	initFramebuffer();
+	initFramebuffer(width, height);
+}
+
+void SlipFrameBuffer::updateSize(int& width, int& height)
+{
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+	glBindTexture(GL_TEXTURE_2D, textureColorBuffer);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textureColorBuffer, 0);
+
+	glGenRenderbuffers(1, &rbo);
+	glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		std::cout << "ERROR::FRAMEBUFFER:: Framebuffer is not complete!" << std::endl;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void SlipFrameBuffer::bind()
@@ -86,7 +114,7 @@ void SlipFrameBuffer::unbind()
 
 void SlipFrameBuffer::draw()
 {
-	shader.use();
+	shader->use();
 
 	glBindVertexArray(VAO);
 	glBindTexture(GL_TEXTURE_2D, textureColorBuffer);

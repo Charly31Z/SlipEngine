@@ -9,6 +9,9 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
+#define IMGUI_DEFINE_MATH_OPERATORS
+#include "imgui_internal.h"
+
 #include <glm/glm.hpp>
 
 #include <iostream>
@@ -17,6 +20,10 @@
 #include "SlipEntity.h"
 #include "SlipUI.h"
 #include "SlipFrameBuffer.h"
+#include "SlipModelExtract.h"
+#include "SlipLevel.h"
+
+#include <filesystem>
 
 class SlipEditor
 {
@@ -25,6 +32,11 @@ private:
 	int& height;
 
 	enum property_type {
+		LEVEL,
+		BSP,
+		MODEL,
+		COLLISION,
+		MATERIAL,
 		ENTITY,
 		UI
 	};
@@ -32,28 +44,57 @@ private:
 	imgui_addons::ImGuiFileBrowser file_dialog;
 
 	bool hierarchy;
-	bool hierarchyImport;
-	bool hierarchySave;
+	bool hierarchyOpen;
 
 	bool properties;
 	property_type prop = property_type::ENTITY;
 
+	bool existEnity = false;
+	const char* entity_mesh = NULL;
+	const char* collision_type = NULL;
+	std::string materials_name = "";
+	const char* playBtn = "Play";
 	int entitySelected;
 	int uiSelected;
 
-	std::vector<SlipEntity>& entities;
-	std::vector<SlipUI>& uis;
+	int matSelected = 0;
+
+	/*std::vector<SlipEntity>& entities;
+	std::vector<SlipUI>& uis;*/
 
 	bool game;
-public:
-	SlipEditor(std::vector<SlipEntity>& entities, std::vector<SlipUI>& uis, int& width, int& height);
+	bool mouseRClicked;
 
-	void init(GLFWwindow* window);
+	bool scene;
+	bool createBsp;
+	bool createModel;
+	bool createCol;
+	bool createTexture;
+	bool sceneImport;
+
+	SlipModelExtract extractor;
+
+	SlipLevel* currentLevel;
+	int sceneTypeSelected = 0;
+
+	int selectedType;
+	int selectedChildType;
+
+	float posEnt[3] = { 0.f, 0.f, 0.f };
+	float rotEnt[3] = { 0.f, 0.f, 0.f };
+	float scaEnt[3] = { 1.f, 1.f, 1.f };
+public:
+	bool mouseRPressed();
+
+	SlipEditor(int& width, int& height);
+
+	void init(GLFWwindow* window, SlipLevel& level);
 
 	void startRender();
-	void renderHierarchy(SlipShader& shader, SlipLight& sun, std::vector<SlipLight>& lights);
+	void renderHierarchy();
 	void renderProperties();
 	void renderGame(SlipFrameBuffer& frameBuffer);
+	void renderScene();
 	void endRender();
 };
 

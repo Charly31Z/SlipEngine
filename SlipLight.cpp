@@ -1,6 +1,6 @@
 #include "SlipLight.h"
 
-void SlipLight::draw(glm::mat4 viewProj)
+/*void SlipLight::draw(glm::mat4 viewProj)
 {
 	lightShader.use();
 
@@ -13,7 +13,7 @@ void SlipLight::draw(glm::mat4 viewProj)
 	lightShader.setMat4("mvp", mvp);
 
 	lightModel.Draw(lightShader);
-}
+}*/
 
 SlipLight::SlipLight(glm::vec3 position, glm::vec3 color, LIGHT type) : type(type)
 {

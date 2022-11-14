@@ -110,13 +110,15 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_WIN32;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;A:\dev\Libraries\imgui\FileBrowser;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;A:\dev\Libraries\imgui\FileBrowser;A:\dev\Libraries\bulletphysics\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>A:\dev\Libraries\assimp\libs;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>glfw3.lib;assimp-vc142-mtd.lib;opengl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>A:\dev\Libraries\assimp\libs;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\lib-vc2022;A:\dev\Libraries\bulletphysics\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>glfw3_mt.lib;assimp-vc142-mtd.lib;opengl32.lib;shlwapi.lib;BulletCollision_Debug.lib;BulletDynamics_Debug.lib;LinearMath_Debug.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -127,15 +129,15 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_WIN32;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;A:\dev\Libraries\imgui\FileBrowser;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>A:\dev\Libraries\glm;A:\dev\Libraries\glad\include;A:\dev\Libraries\stb;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\include;A:\dev\Libraries\assimp\include;A:\dev\Libraries\imgui\include;A:\dev\Libraries\imgui\FileBrowser;A:\dev\Libraries\bulletphysics\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>A:\dev\Libraries\assimp\libs;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>glfw3.lib;assimp-vc142-mtd.lib;opengl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>A:\dev\Libraries\assimp\libs;A:\dev\Libraries\glfw-3.3.7.bin.WIN64\lib-vc2022;A:\dev\Libraries\bulletphysics\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>glfw3.lib;assimp-vc142-mtd.lib;opengl32.lib;shlwapi.lib;BulletCollision_Debug.lib;BulletDynamics_Debug.lib;LinearMath_Debug.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -148,31 +150,48 @@
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_impl_opengl3.cpp" />
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_tables.cpp" />
     <ClCompile Include="..\..\..\..\..\..\dev\Libraries\imgui\src\imgui_widgets.cpp" />
+    <ClCompile Include="DebugCollision.cpp" />
+    <ClCompile Include="SlipBsp.cpp" />
     <ClCompile Include="SlipCamera.cpp" />
+    <ClCompile Include="SlipCharacter.cpp" />
+    <ClCompile Include="SlipCollision.cpp" />
+    <ClCompile Include="SlipDebug.cpp" />
     <ClCompile Include="SlipEditor.cpp" />
     <ClCompile Include="SlipEngine.cpp" />
     <ClCompile Include="SlipEntity.cpp" />
     <ClCompile Include="SlipFrameBuffer.cpp" />
+    <ClCompile Include="SlipLevel.cpp" />
     <ClCompile Include="SlipLight.cpp" />
     <ClCompile Include="SlipMaterial.cpp" />
     <ClCompile Include="SlipMesh.cpp" />
-    <ClCompile Include="SlipModel.cpp" />
+    <ClCompile Include="SlipModelExtract.cpp" />
+    <ClCompile Include="SlipPlayer.cpp" />
     <ClCompile Include="SlipShader.cpp" />
+    <ClCompile Include="SlipTexture.cpp" />
     <ClCompile Include="SlipUI.cpp" />
     <ClCompile Include="VAO.cpp" />
     <ClCompile Include="VBO.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="DebugCollision.h" />
     <ClInclude Include="io.h" />
+    <ClInclude Include="SlipBsp.h" />
     <ClInclude Include="SlipCamera.h" />
+    <ClInclude Include="SlipCharacter.h" />
+    <ClInclude Include="SlipCollision.h" />
+    <ClInclude Include="SlipDebug.h" />
     <ClInclude Include="SlipEditor.h" />
     <ClInclude Include="SlipEntity.h" />
     <ClInclude Include="SlipFrameBuffer.h" />
+    <ClInclude Include="SlipGlobals.h" />
+    <ClInclude Include="SlipLevel.h" />
     <ClInclude Include="SlipLight.h" />
     <ClInclude Include="SlipMaterial.h" />
     <ClInclude Include="SlipMesh.h" />
-    <ClInclude Include="SlipModel.h" />
+    <ClInclude Include="SlipModelExtract.h" />
+    <ClInclude Include="SlipPlayer.h" />
     <ClInclude Include="SlipShader.h" />
+    <ClInclude Include="SlipTexture.h" />
     <ClInclude Include="SlipUI.h" />
     <ClInclude Include="VAO.h" />
     <ClInclude Include="VBO.h" />
@@ -180,6 +199,10 @@
   <ItemGroup>
     <None Include="assets\shaders\basic.frag" />
     <None Include="assets\shaders\basic.vert" />
+    <None Include="assets\shaders\bsp.frag" />
+    <None Include="assets\shaders\bsp.vert" />
+    <None Include="assets\shaders\debug.frag" />
+    <None Include="assets\shaders\debug.vert" />
     <None Include="assets\shaders\light.frag" />
     <None Include="assets\shaders\light.vert" />
     <None Include="assets\shaders\mvp.frag" />

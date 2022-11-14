@@ -9,18 +9,14 @@
 #include <assimp/config.h>
 
 #include <iostream>
-#include <fstream>
 
 #include "io.h"
 #include "SlipEditor.h"
-#include "SlipCamera.h"
 #include "SlipShader.h"
-#include "SlipModel.h"
-#include "SlipLight.h"
-#include "SlipMaterial.h"
 #include "SlipUI.h"
 #include "SlipEntity.h"
 #include "SlipFrameBuffer.h"
+#include "SlipLevel.h"
 
 int widthS = 1280, heightS = 720;
 
@@ -28,9 +24,6 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void processInput(GLFWwindow* window);
-
-// camera
-SlipCamera camera(glm::vec3(-6.f, 10.f, 15.f));
 
 bool firstMouse = true;
 bool canMoveMouse = false;
@@ -45,7 +38,9 @@ std::vector<SlipEntity> entities;
 std::vector<SlipUI> uis;
 
 // editor
-SlipEditor editor{entities, uis, widthS, heightS};
+SlipEditor editor{widthS, heightS};
+
+SlipFrameBuffer framebuffer;
 
 int main()
 {
@@ -73,15 +68,19 @@ int main()
         return -1;
     }
 
-    camera.ProcessWindow(widthS, heightS);
+    SlipLevel::Camera.ProcessWindow(widthS, heightS);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     //glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 
-    editor.init(window);
+    SlipLevel level{ "test" };
 
-    SlipLight sun(glm::vec3(-15.0f, -10.0f, 8.0f), glm::vec3(1.f, 1.f, 1.f), SlipLight::LIGHT::DIRECTIONAL);
+    editor.init(window, level);
+
+    /*SlipLight sun(glm::vec3(-15.0f, -10.0f, 8.0f), glm::vec3(1.f, 1.f, 1.f), SlipLight::LIGHT::DIRECTIONAL);
 
     std::vector<SlipLight> lights;
     
@@ -111,20 +110,23 @@ int main()
     entities.push_back(entTele);
 
     SlipUI testUi{"placeholder", camera, glm::vec2(0.f), "assets/textures/placeholder.png"};
-    uis.push_back(testUi);
+    uis.push_back(testUi);*/
 
-    SlipFrameBuffer framebuffer{widthS, heightS};
+    framebuffer.init(widthS, heightS);
 
     while (!glfwWindowShouldClose(window))
     {
         editor.startRender();
-        editor.renderHierarchy(shader, sun, lights);
+        editor.renderHierarchy();
         editor.renderProperties();
         editor.renderGame(framebuffer);
+        editor.renderScene();
 
         float currentFrame = static_cast<float>(glfwGetTime());
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
+
+        SlipLevel::Camera.dt = deltaTime;
 
         processInput(window);
 
@@ -137,12 +139,14 @@ int main()
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        camera.ProcessWindow(widthS, heightS);
+        SlipLevel::Camera.ProcessWindow(widthS, heightS);
 
-        for (auto& entity : entities)
+        level.draw();
+
+        /*for (auto& entity : entities)
         {
             entity.draw(camera);
-        }
+        }*/
 
         // DRAW HUD
 
@@ -166,6 +170,7 @@ int main()
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
+    level.clean();
 
     glfwTerminate();
 
@@ -178,6 +183,8 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
     heightS = height;
     glfwSetWindowSize(window, width, height);
     glViewport(0, 0, width, height);
+
+    framebuffer.updateSize(width, height);
 }
 
 void processInput(GLFWwindow* window)
@@ -188,29 +195,29 @@ void processInput(GLFWwindow* window)
     if (canMoveMouse)
     {
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-            camera.ProcessKeyboard(Camera_Movement::FORWARD, deltaTime);
+            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::FORWARD, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-            camera.ProcessKeyboard(Camera_Movement::BACKWARD, deltaTime);
+            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::BACKWARD, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-            camera.ProcessKeyboard(Camera_Movement::LEFT, deltaTime);
+            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::LEFT, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-            camera.ProcessKeyboard(Camera_Movement::RIGHT, deltaTime);
+            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::RIGHT, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
-            camera.ProcessKeyboard(Camera_Movement::DOWN, deltaTime);
+            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::DOWN, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
-            camera.ProcessKeyboard(Camera_Movement::UP, deltaTime);
+            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::UP, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-            camera.MovementSpeed = 30.f;
+            SlipLevel::Camera.MovementSpeed = 30.f;
         if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_RELEASE)
-            camera.MovementSpeed = 2.5f;
+            SlipLevel::Camera.MovementSpeed = 2.5f;
     }
 
-    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_2) == GLFW_PRESS)
+    if (editor.mouseRPressed())
     {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         canMoveMouse = true;
     }
-    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_2) == GLFW_RELEASE)
+    else
     {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         canMoveMouse = false;
@@ -237,7 +244,7 @@ void mouse_callback(GLFWwindow* window, double xposIn, double yposIn)
         lastX = xpos;
         lastY = ypos;
 
-        camera.ProcessMouseMovement(xoffset, yoffset);
+        SlipLevel::Camera.ProcessMouseMovement(xoffset, yoffset);
     }
 }
 
@@ -245,7 +252,8 @@ void mouse_callback(GLFWwindow* window, double xposIn, double yposIn)
 // ----------------------------------------------------------------------
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
-    camera.ProcessMouseScroll((float)yoffset);
+    if (canMoveMouse)
+        SlipLevel::Camera.ProcessMouseScroll((float)yoffset);
 }
 
 // Run program: Ctrl + F5 or Debug > Start Without Debugging menu

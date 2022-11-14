@@ -5,9 +5,14 @@
 
 #include <glm/glm.hpp>
 
-#include "SlipShader.h"
 #include <vector>
 #include <string>
+#include <fstream>
+
+#include "SlipCollision.h"
+#include "SlipMaterial.h"
+#include "SlipShader.h"
+#include "io.h"
 
 #define MAX_BONE_INFLUENCE 4
 
@@ -19,28 +24,54 @@ struct Vertex {
     glm::vec3 Bitangent;
     int m_BoneIDs[MAX_BONE_INFLUENCE];
     float m_Weights[MAX_BONE_INFLUENCE];
-};
-
-struct Texture {
-    unsigned int id;
-    std::string type;
-    std::string path;
+    int materialIndex;
 };
 
 class SlipMesh
 {
 public:
+    struct Material
+    {
+        char matPath[192];
+        SlipMaterial* mat;
+
+        Material(std::string matPath)
+        {
+            strcpy(this->matPath, matPath.c_str());
+        }
+    };
+
+    struct Mesh
+    {
+        GLuint VAO, VBO, EBO;
+
+        int materialIndex;
+        std::vector<Vertex>       vertices;
+        std::vector<unsigned int> indices;
+    };
+
+    std::string path;
+
+    bool initialized = false;
+
     // mesh data
-    std::vector<Vertex>       vertices;
-    std::vector<unsigned int> indices;
-    std::vector<Texture>      textures;
+    std::vector<Mesh> meshes;
 
-    SlipMesh(std::vector<Vertex> vertices, std::vector<unsigned int> indices, std::vector<Texture> textures);
-    void Draw(SlipShader& shader);
+    char colPath[192];
+    SlipCollision* collision;
+
+    std::vector<Material> materials;
+
+    SlipMesh(const char* path);
+
+    void init();
+
+    void draw(glm::mat4 transform);
+    void clean();
 private:
-    //  render data
-    GLuint VAO, VBO, EBO;
-
+    void loadFromFile(const char* path);
+    void loadColFromFile(std::string path);
+    void loadMatFromFile();
     void setupMesh();
 };
 

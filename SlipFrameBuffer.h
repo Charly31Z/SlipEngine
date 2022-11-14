@@ -27,16 +27,18 @@ private:
 
 	unsigned int fbo, rbo;
 
-	SlipShader shader{ "assets/shaders/screen.vert", "assets/shaders/screen.frag" };
-
-	int& width, height;
+	SlipShader* shader;
 
 	void initMesh();
-	void initFramebuffer();
+	void initFramebuffer(int& width, int& height);
 public:
 	unsigned int textureColorBuffer;
 
-	SlipFrameBuffer(int& width, int& height);
+	SlipFrameBuffer();
+
+	void init(int& width, int& height);
+
+	void updateSize(int& width, int& height);
 
 	void bind();
 	void unbind();

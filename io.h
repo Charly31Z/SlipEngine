@@ -6,9 +6,9 @@
 namespace IO
 {
 	template<typename T>
-	inline void read(std::iostream& istream, T& t)
+	inline void read(std::ifstream& ifstream, T& t)
 	{
-		istream.read(reinterpret_cast<char*>(&t), sizeof(T));
+		ifstream.read(reinterpret_cast<char*>(&t), sizeof(T));
 	}
 
 	inline void readAllFromFile(const std::string& filePath, std::string& s)

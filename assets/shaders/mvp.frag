@@ -59,7 +59,9 @@ void main()
     vec3 color = result * txtColor;
     float gamma = 2.2;
     color = pow(color, vec3(1.0/gamma));
-    FragColor = vec4(color, 1.0);
+    //FragColor = vec4(color, 1.0);
+
+    FragColor = vec4(1.0);
 }
 
 vec3 CalcSunLight(SunLight light, vec3 normal, vec3 viewDir)

@@ -9,6 +9,50 @@ SlipCamera::SlipCamera(glm::vec3 position, glm::vec3 up, float yaw, float pitch)
     updateCameraVectors();
 }
 
+void SlipCamera::drawDebug()
+{
+    glm::mat4 inv = glm::inverse(GetViewMatrix() * GetProjectionMatrix());
+
+    glm::vec4 f[8u] =
+    {
+        // near face
+        {(width * near), (height * near), -near, 1.f},
+        {-(width * near), (height * near), -near, 1.f},
+        {(width * near), -(height * near), -near, 1.f},
+        {-(width * near), -(height * near), -near, 1.f},
+
+        // far face
+        {(width * far), (height * far), far, 1.f},
+        {-(width * far), (height * far), far , 1.f},
+        {(width * far), -(height * far), far , 1.f},
+        {-(width * far), -(height * far),far, 1.f},
+    };
+
+    glm::vec3 v[8u];
+    for (int i = 0; i < 8; i++)
+    {
+        glm::vec4 ff = inv * f[i];
+        v[i].x = ff.x / ff.w;
+        v[i].y = ff.y / ff.w;
+        v[i].z = ff.z / ff.w;
+    }
+
+    SlipDebug::drawLines(v[0], v[1], Color::yellow);
+    SlipDebug::drawLines(v[0], v[2], Color::yellow);
+    SlipDebug::drawLines(v[3], v[1], Color::yellow);
+    SlipDebug::drawLines(v[3], v[2], Color::yellow);
+
+    SlipDebug::drawLines(v[4], v[5], Color::yellow);
+    SlipDebug::drawLines(v[4], v[6], Color::yellow);
+    SlipDebug::drawLines(v[7], v[5], Color::yellow);
+    SlipDebug::drawLines(v[7], v[6], Color::yellow);
+
+    SlipDebug::drawLines(v[0], v[4], Color::yellow);
+    SlipDebug::drawLines(v[1], v[5], Color::yellow);
+    SlipDebug::drawLines(v[3], v[7], Color::yellow);
+    SlipDebug::drawLines(v[2], v[6], Color::yellow);
+}
+
 glm::mat4 SlipCamera::GetViewMatrix()
 {
     return glm::lookAt(Position, Position + Front, Up);
@@ -16,7 +60,7 @@ glm::mat4 SlipCamera::GetViewMatrix()
 
 glm::mat4 SlipCamera::GetProjectionMatrix()
 {
-    return glm::perspective(glm::radians(Zoom), (float)width / (float)height, 0.1f, 50000.0f);
+    return glm::perspective(glm::radians(Zoom), (float)width / (float)height, near, far);
 }
 
 glm::mat4 SlipCamera::GetOrthographicMatrix()
