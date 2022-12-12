@@ -3,13 +3,7 @@
 #ifndef SLIP_CAMERA_H
 #define SLIP_CAMERA_H
 
-
-#include "glad/glad.h"
-#include "glm/glm.hpp"
-#include <glm/ext/matrix_transform.hpp>
-#include <glm/ext/matrix_clip_space.hpp>
-
-#include "SlipDebug.h"
+#include "SlipEntity.h"
 
 // Defines several possible options for camera movement. Used as abstraction to stay away from window-system specific input methods
 enum Camera_Movement {
@@ -30,11 +24,13 @@ const float SPEED = 2.5f;
 const float SENSITIVITY = 0.1f;
 const float ZOOM = 75.0f;
 
-class SlipCamera
+class SlipCamera : public SlipEntity
 {
 public:
+    void Start() {}
+    void Update();
+
     // camera Attributes
-    glm::vec3 Position;
     glm::vec3 Front;
     glm::vec3 Up;
     glm::vec3 Right;
@@ -49,10 +45,15 @@ public:
 
     float dt;
 
-    float near = 0.1f;
-    float far = 50000.0f;
+    float nCam = 0.1f;
+    float fCam = 50000.0f;
 
     float width, height;
+
+    float lastX, lastY;
+
+    bool firstMouse = false;
+    bool canMove = false;
 
     SlipCamera(glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f), float yaw = YAW, float pitch = PITCH);
 
@@ -64,7 +65,7 @@ public:
 
     void ProcessKeyboard(Camera_Movement direction, float deltaTime);
     void ProcessWindow(float width, float height);
-    void ProcessMouseMovement(float xoffset, float yoffset, GLboolean constrainPitch = true);
+    void ProcessMouseMovement(float xoffset, float yoffset, bool constrainPitch = true);
     void ProcessMouseScroll(float yoffset);
 private:
     void updateCameraVectors();

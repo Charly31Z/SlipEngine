@@ -5,21 +5,15 @@
 
 #include <vector>
 #include <string>
-#include <fstream>
-#include <filesystem>
-#include <shlwapi.h>
 
 #include "SlipEntity.h"
-#include "SlipMesh.h"
-
 #include "SlipBsp.h"
-#include "io.h"
 
 #include "DebugCollision.h"
 
 #include <btBulletDynamicsCommon.h>
 
-struct SlipLevel
+class SlipLevel
 {
 private:
 	btBroadphaseInterface* broadphase;
@@ -31,10 +25,16 @@ private:
 	DebugCollision* debugCol;
 
 	bool playing = false;
-public:
-	inline static std::string levelName;
 
-	inline static SlipCamera Camera;
+	inline static SlipCamera* m_Camera;
+
+	inline static SlipLevel* m_Instance;
+public:
+	inline static SlipLevel& Get() { return *m_Instance; }
+	
+	inline static SlipCamera& GetCamera() { return *m_Camera; }
+
+	std::string levelName;
 
 	bool canDraw = false;
 
@@ -42,7 +42,7 @@ public:
 
 	SlipBsp* mBsp;
 	std::vector<SlipMesh> models;
-	std::vector<SlipEntity> entities;
+	std::vector<SlipEntity*> entities;
 	//std::vector<SlipEntity> spawnLocation;
 
 	SlipLevel(std::string levelName);

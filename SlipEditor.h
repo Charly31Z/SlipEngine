@@ -3,8 +3,6 @@
 #ifndef SLIP_EDITOR_H
 #define SLIP_EDITOR_H
 
-#include <ImGuiFileBrowser.h>
-
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -12,24 +10,14 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui_internal.h"
 
-#include <glm/glm.hpp>
-
-#include <iostream>
-#include <vector>
-
-#include "SlipEntity.h"
-#include "SlipUI.h"
 #include "SlipFrameBuffer.h"
 #include "SlipModelExtract.h"
-#include "SlipLevel.h"
-
-#include <filesystem>
 
 class SlipEditor
 {
 private:
-	int& width;
-	int& height;
+	int width;
+	int height;
 
 	enum property_type {
 		LEVEL,
@@ -40,8 +28,6 @@ private:
 		ENTITY,
 		UI
 	};
-
-	imgui_addons::ImGuiFileBrowser file_dialog;
 
 	bool hierarchy;
 	bool hierarchyOpen;
@@ -72,9 +58,10 @@ private:
 	bool createTexture;
 	bool sceneImport;
 
+	bool createEntity;
+
 	SlipModelExtract extractor;
 
-	SlipLevel* currentLevel;
 	int sceneTypeSelected = 0;
 
 	int selectedType;
@@ -83,18 +70,24 @@ private:
 	float posEnt[3] = { 0.f, 0.f, 0.f };
 	float rotEnt[3] = { 0.f, 0.f, 0.f };
 	float scaEnt[3] = { 1.f, 1.f, 1.f };
+
+	inline static SlipEditor* m_Instante;
 public:
+	inline static SlipEditor& Get() { return *m_Instante; }
+
 	bool mouseRPressed();
 
-	SlipEditor(int& width, int& height);
+	SlipEditor(int width, int height);
 
-	void init(GLFWwindow* window, SlipLevel& level);
+	void init();
 
 	void startRender();
 	void renderHierarchy();
 	void renderProperties();
 	void renderGame(SlipFrameBuffer& frameBuffer);
 	void renderScene();
+	void processWindow();
+	void processInput();
 	void endRender();
 };
 

@@ -1,5 +1,7 @@
 #include "SlipUI.h"
 
+#include <glad/glad.h>
+
 #include "stb_image.h"
 
 glm::mat4 SlipUI::getModelMatrix()

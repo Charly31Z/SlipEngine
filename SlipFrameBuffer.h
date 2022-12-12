@@ -3,10 +3,6 @@
 #ifndef SLIP_FRAMEBUFFER_H
 #define SLIP_FRAMEBUFFER_H
 
-#include <glad/glad.h>
-#include <glm/glm.hpp>
-
-#include <iostream>
 #include <vector>
 
 #include "SlipShader.h"
@@ -21,24 +17,28 @@ private:
 	};
 
 	std::vector<Vertex> vertices;
-	std::vector<GLuint> indices;
+	std::vector<unsigned int> indices;
 
-	GLuint VAO, VBO, EBO;
+	unsigned int VAO, VBO, EBO;
 
 	unsigned int fbo, rbo;
 
 	SlipShader* shader;
 
 	void initMesh();
-	void initFramebuffer(int& width, int& height);
+	void initFramebuffer();
+
+	inline static std::vector<SlipFrameBuffer*> m_Instances;
 public:
+	inline static SlipFrameBuffer& Get(int index) { return *m_Instances[index]; }
+
 	unsigned int textureColorBuffer;
 
 	SlipFrameBuffer();
 
-	void init(int& width, int& height);
+	void init();
 
-	void updateSize(int& width, int& height);
+	void updateSize();
 
 	void bind();
 	void unbind();

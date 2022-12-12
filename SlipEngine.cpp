@@ -1,6 +1,8 @@
 // SlipEngine.cpp : This file contains the 'main' function. Program execution begins and ends there.
 //
-#include <glad/glad.h>
+
+/****
+
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -68,7 +70,7 @@ int main()
         return -1;
     }
 
-    SlipLevel::Camera.ProcessWindow(widthS, heightS);
+    SlipLevel::GetCamera().ProcessWindow(widthS, heightS);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -110,7 +112,7 @@ int main()
     entities.push_back(entTele);
 
     SlipUI testUi{"placeholder", camera, glm::vec2(0.f), "assets/textures/placeholder.png"};
-    uis.push_back(testUi);*/
+    uis.push_back(testUi);
 
     framebuffer.init(widthS, heightS);
 
@@ -126,7 +128,7 @@ int main()
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
-        SlipLevel::Camera.dt = deltaTime;
+        SlipLevel::GetCamera().dt = deltaTime;
 
         processInput(window);
 
@@ -139,14 +141,14 @@ int main()
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        SlipLevel::Camera.ProcessWindow(widthS, heightS);
+        SlipLevel::GetCamera().ProcessWindow(widthS, heightS);
 
         level.draw();
 
-        /*for (auto& entity : entities)
+        for (auto& entity : entities)
         {
             entity.draw(camera);
-        }*/
+        }
 
         // DRAW HUD
 
@@ -195,21 +197,21 @@ void processInput(GLFWwindow* window)
     if (canMoveMouse)
     {
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::FORWARD, deltaTime);
+            SlipLevel::GetCamera().ProcessKeyboard(Camera_Movement::FORWARD, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::BACKWARD, deltaTime);
+            SlipLevel::GetCamera().ProcessKeyboard(Camera_Movement::BACKWARD, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::LEFT, deltaTime);
+            SlipLevel::GetCamera().ProcessKeyboard(Camera_Movement::LEFT, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::RIGHT, deltaTime);
+            SlipLevel::GetCamera().ProcessKeyboard(Camera_Movement::RIGHT, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
-            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::DOWN, deltaTime);
+            SlipLevel::GetCamera().ProcessKeyboard(Camera_Movement::DOWN, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
-            SlipLevel::Camera.ProcessKeyboard(Camera_Movement::UP, deltaTime);
+            SlipLevel::GetCamera().ProcessKeyboard(Camera_Movement::UP, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-            SlipLevel::Camera.MovementSpeed = 30.f;
+            SlipLevel::GetCamera().MovementSpeed = 30.f;
         if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_RELEASE)
-            SlipLevel::Camera.MovementSpeed = 2.5f;
+            SlipLevel::GetCamera().MovementSpeed = 2.5f;
     }
 
     if (editor.mouseRPressed())
@@ -244,7 +246,7 @@ void mouse_callback(GLFWwindow* window, double xposIn, double yposIn)
         lastX = xpos;
         lastY = ypos;
 
-        SlipLevel::Camera.ProcessMouseMovement(xoffset, yoffset);
+        SlipLevel::GetCamera().ProcessMouseMovement(xoffset, yoffset);
     }
 }
 
@@ -253,7 +255,15 @@ void mouse_callback(GLFWwindow* window, double xposIn, double yposIn)
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
     if (canMoveMouse)
-        SlipLevel::Camera.ProcessMouseScroll((float)yoffset);
+        SlipLevel::GetCamera().ProcessMouseScroll((float)yoffset);
+}****/
+
+#include "Engine.h"
+
+int main()
+{
+    Engine* engine;
+    engine = new Engine();
 }
 
 // Run program: Ctrl + F5 or Debug > Start Without Debugging menu

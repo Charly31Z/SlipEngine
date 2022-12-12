@@ -1,6 +1,12 @@
 #include "SlipDebug.h"
 
-inline glm::vec3 SlipDebug::colorToVec3(Color color)
+#include <glad/glad.h>
+
+#include "SlipLevel.h"
+
+#include <assert.h>
+
+glm::vec3 SlipDebug::colorToVec3(Color color)
 {
 	glm::vec3 out;
 	switch (color)
@@ -29,7 +35,7 @@ inline glm::vec3 SlipDebug::colorToVec3(Color color)
 	return out;
 }
 
-inline void SlipDebug::drawLines(glm::vec3 lineStart, glm::vec3 lineEnd, Color color)
+void SlipDebug::drawLines(glm::vec3 lineStart, glm::vec3 lineEnd, Color color)
 {
 	lines.push_back(lineStart);
 	lines.push_back(colorToVec3(color));
@@ -37,7 +43,7 @@ inline void SlipDebug::drawLines(glm::vec3 lineStart, glm::vec3 lineEnd, Color c
 	lines.push_back(colorToVec3(color));
 }
 
-inline void SlipDebug::draw()
+void SlipDebug::draw()
 {
 	if (lines.size() == 0)
 		return;
@@ -82,8 +88,8 @@ inline void SlipDebug::draw()
 
 	shader->use();
 
-	glm::mat4 proj = SlipLevel::Camera.GetProjectionMatrix();
-	glm::mat4 view = SlipLevel::Camera.GetViewMatrix();
+	glm::mat4 proj = SlipLevel::Get().GetCamera().GetProjectionMatrix();
+	glm::mat4 view = SlipLevel::Get().GetCamera().GetViewMatrix();
 
 	shader->setMat4("projection", proj);
 	shader->setMat4("view", view);
@@ -99,5 +105,7 @@ inline void SlipDebug::draw()
 
 SlipDebug::SlipDebug()
 {
+	assert(!m_Instance && "SlipDebug has initialized...");
+	m_Instance = this;
 	strcpy(spawnMeshPath, "cache/debug/spawn.model_cache");
 }

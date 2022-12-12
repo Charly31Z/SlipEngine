@@ -1,5 +1,9 @@
 #include "SlipBsp.h"
 
+#include "io.h"
+
+#include "Engine.h"
+
 void SlipBsp::initCol()
 {
     btTriangleMesh *triangles = new btTriangleMesh();
@@ -240,8 +244,8 @@ void SlipBsp::draw()
     glActiveTexture(GL_TEXTURE0);
     mesh.mat.lightmaps[0].draw();
 
-    glm::mat4 proj = SlipLevel::Camera.GetProjectionMatrix();
-    glm::mat4 view = SlipLevel::Camera.GetViewMatrix();
+    glm::mat4 proj = Engine::Get().GetPrimaryCamera().GetProjectionMatrix();
+    glm::mat4 view = Engine::Get().GetPrimaryCamera().GetViewMatrix();
 
     shader->setMat4("projection", proj);
     shader->setMat4("view", view);

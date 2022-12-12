@@ -4,13 +4,9 @@
 #define SLIP_DEBUG_H
 
 #include <glm/glm.hpp>
-#include <glad/glad.h>
-
-#include <string>
 #include <vector>
 
-#include "SlipShader.h"
-#include "SlipLevel.h"
+class SlipShader;
 
 enum Color
 {
@@ -22,19 +18,23 @@ enum Color
 	green
 };
 
-struct SlipDebug
+class SlipDebug
 {
 private:
 	unsigned int VAO, VBO;
 	SlipShader* shader;
 
-	inline static glm::vec3 colorToVec3(Color color);
+	glm::vec3 colorToVec3(Color color);
 
-	inline static std::vector<glm::vec3> lines;
+	std::vector<glm::vec3> lines;
+
+	inline static SlipDebug* m_Instance;
 public:
-	inline static char spawnMeshPath[192] = "";
+	inline static SlipDebug& Get() { return *m_Instance; }
 
-	inline static void drawLines(glm::vec3 lineStart, glm::vec3 lineEnd, Color color);
+	char spawnMeshPath[192] = "";
+
+	void drawLines(glm::vec3 lineStart, glm::vec3 lineEnd, Color color);
 
 	void draw();
 

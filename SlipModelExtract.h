@@ -3,19 +3,10 @@
 #ifndef SLIP_MODEL_EXTRACTOR_H
 #define SLIP_MODEL_EXTRACTOR_H
 
-#include <assimp/Importer.hpp>
-#include <assimp/scene.h>
-#include <assimp/postprocess.h>
-
-#include <iostream>
-#include <fstream>
 #include <vector>
 #include <string>
 
 #include "SlipLevel.h"
-#include "io.h"
-
-#include <filesystem>
 
 class SlipModelExtract
 {

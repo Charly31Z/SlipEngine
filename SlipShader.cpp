@@ -1,5 +1,9 @@
 #include "SlipShader.h"
 
+#include <glad/glad.h>
+
+#include "io.h"
+
 SlipShader::SlipShader(const char* vertexPath, const char* fragmentPath)
 {
     int  success;

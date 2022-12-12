@@ -5,7 +5,6 @@
 
 #include <glm/glm.hpp>
 
-#include "SlipShader.h"
 #include "SlipMesh.h"
 
 class SlipLight

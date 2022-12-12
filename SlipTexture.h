@@ -4,10 +4,6 @@
 #define SLIP_TEXTURE_H
 
 #include <string>
-#include <glad/glad.h>
-
-#include "stb_image.h"
-#include "stb_image_write.h"
 
 struct ImageData
 {

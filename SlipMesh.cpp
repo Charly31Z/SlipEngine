@@ -1,5 +1,6 @@
 #include "SlipMesh.h"
-#include "SlipMesh.h"
+
+#include <glad/glad.h>
 
 void SlipMesh::init()
 {

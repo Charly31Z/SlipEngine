@@ -1,8 +1,72 @@
 #include "SlipCamera.h"
 
-SlipCamera::SlipCamera(glm::vec3 position, glm::vec3 up, float yaw, float pitch) : Front(glm::vec3(0.0f, 0.0f, -1.0f)), MovementSpeed(SPEED), MouseSensitivity(SENSITIVITY), Zoom(ZOOM)
+#include <glad/glad.h>
+
+#include "SlipDebug.h"
+
+#include "SlipInput.h"
+
+#include "SlipGlobals.h"
+
+#include "SlipEditor.h"
+
+void SlipCamera::Update()
 {
-    Position = position;
+    if (canMove)
+    {
+        if (SlipInput::Get().GetKey(GLFW_KEY_W) == GLFW_PRESS)
+            ProcessKeyboard(Camera_Movement::FORWARD, SlipGlobals::Get().GetDeltaTime());
+        if (SlipInput::Get().GetKey(GLFW_KEY_A) == GLFW_PRESS)
+            ProcessKeyboard(Camera_Movement::LEFT, SlipGlobals::Get().GetDeltaTime());
+        if (SlipInput::Get().GetKey(GLFW_KEY_S) == GLFW_PRESS)
+            ProcessKeyboard(Camera_Movement::BACKWARD, SlipGlobals::Get().GetDeltaTime());
+        if (SlipInput::Get().GetKey(GLFW_KEY_D) == GLFW_PRESS)
+            ProcessKeyboard(Camera_Movement::RIGHT, SlipGlobals::Get().GetDeltaTime());
+        if (SlipInput::Get().GetKey(GLFW_KEY_E) == GLFW_PRESS)
+            ProcessKeyboard(Camera_Movement::UP, SlipGlobals::Get().GetDeltaTime());
+        if (SlipInput::Get().GetKey(GLFW_KEY_Q) == GLFW_PRESS)
+            ProcessKeyboard(Camera_Movement::DOWN, SlipGlobals::Get().GetDeltaTime());
+        if (SlipInput::Get().GetKey(GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+            MovementSpeed = 30.f;
+        if (SlipInput::Get().GetKey(GLFW_KEY_LEFT_SHIFT) == GLFW_RELEASE)
+            MovementSpeed = 2.5f;
+
+        glm::vec2 posMouse = SlipInput::Get().GetMousePos();
+        glm::vec2* scrollMouse = &SlipInput::Get().GetMouseScroll();
+
+        if (firstMouse)
+        {
+            lastX = posMouse.x;
+            lastY = posMouse.y;
+            firstMouse = false;
+        }
+
+        float xoffset = posMouse.x - lastX;
+        float yoffset = lastY - posMouse.y; // reversed since y-coordinates go from bottom to top
+        lastX = posMouse.x;
+        lastY = posMouse.y;
+
+        ProcessMouseMovement(xoffset, yoffset);
+
+        if (scrollMouse != nullptr)
+            ProcessMouseScroll(scrollMouse->y);
+    }
+
+    if (SlipEditor::Get().mouseRPressed())
+    {
+        canMove = true;
+    }
+    else {
+        canMove = false;
+        firstMouse = true;
+    }
+
+    ProcessWindow(SlipWindow::Get().getWidth(), SlipWindow::Get().getHeight());
+}
+
+SlipCamera::SlipCamera(glm::vec3 position, glm::vec3 up, float yaw, float pitch) : SlipEntity(), Front(glm::vec3(0.0f, 0.0f, -1.0f)), MovementSpeed(SPEED), MouseSensitivity(SENSITIVITY), Zoom(ZOOM)
+{
+    this->position = position;
     WorldUp = up;
     Yaw = yaw;
     Pitch = pitch;
@@ -15,17 +79,17 @@ void SlipCamera::drawDebug()
 
     glm::vec4 f[8u] =
     {
-        // near face
-        {(width * near), (height * near), -near, 1.f},
-        {-(width * near), (height * near), -near, 1.f},
-        {(width * near), -(height * near), -near, 1.f},
-        {-(width * near), -(height * near), -near, 1.f},
+        // nCam face
+        {(width * nCam), (height * nCam), -nCam, 1.f},
+        {-(width * nCam), (height * nCam), -nCam, 1.f},
+        {(width * nCam), -(height * nCam), -nCam, 1.f},
+        {-(width * nCam), -(height * nCam), -nCam, 1.f},
 
-        // far face
-        {(width * far), (height * far), far, 1.f},
-        {-(width * far), (height * far), far , 1.f},
-        {(width * far), -(height * far), far , 1.f},
-        {-(width * far), -(height * far),far, 1.f},
+        // fCam face
+        {(width * fCam), (height * fCam), fCam, 1.f},
+        {-(width * fCam), (height * fCam), fCam , 1.f},
+        {(width * fCam), -(height * fCam), fCam , 1.f},
+        {-(width * fCam), -(height * fCam),fCam, 1.f},
     };
 
     glm::vec3 v[8u];
@@ -37,30 +101,30 @@ void SlipCamera::drawDebug()
         v[i].z = ff.z / ff.w;
     }
 
-    SlipDebug::drawLines(v[0], v[1], Color::yellow);
-    SlipDebug::drawLines(v[0], v[2], Color::yellow);
-    SlipDebug::drawLines(v[3], v[1], Color::yellow);
-    SlipDebug::drawLines(v[3], v[2], Color::yellow);
+    SlipDebug::Get().drawLines(v[0], v[1], Color::yellow);
+    SlipDebug::Get().drawLines(v[0], v[2], Color::yellow);
+    SlipDebug::Get().drawLines(v[3], v[1], Color::yellow);
+    SlipDebug::Get().drawLines(v[3], v[2], Color::yellow);
 
-    SlipDebug::drawLines(v[4], v[5], Color::yellow);
-    SlipDebug::drawLines(v[4], v[6], Color::yellow);
-    SlipDebug::drawLines(v[7], v[5], Color::yellow);
-    SlipDebug::drawLines(v[7], v[6], Color::yellow);
+    SlipDebug::Get().drawLines(v[4], v[5], Color::yellow);
+    SlipDebug::Get().drawLines(v[4], v[6], Color::yellow);
+    SlipDebug::Get().drawLines(v[7], v[5], Color::yellow);
+    SlipDebug::Get().drawLines(v[7], v[6], Color::yellow);
 
-    SlipDebug::drawLines(v[0], v[4], Color::yellow);
-    SlipDebug::drawLines(v[1], v[5], Color::yellow);
-    SlipDebug::drawLines(v[3], v[7], Color::yellow);
-    SlipDebug::drawLines(v[2], v[6], Color::yellow);
+    SlipDebug::Get().drawLines(v[0], v[4], Color::yellow);
+    SlipDebug::Get().drawLines(v[1], v[5], Color::yellow);
+    SlipDebug::Get().drawLines(v[3], v[7], Color::yellow);
+    SlipDebug::Get().drawLines(v[2], v[6], Color::yellow);
 }
 
 glm::mat4 SlipCamera::GetViewMatrix()
 {
-    return glm::lookAt(Position, Position + Front, Up);
+    return glm::lookAt(position, position + Front, Up);
 }
 
 glm::mat4 SlipCamera::GetProjectionMatrix()
 {
-    return glm::perspective(glm::radians(Zoom), (float)width / (float)height, near, far);
+    return glm::perspective(glm::radians(Zoom), (float)width / (float)height, nCam, fCam);
 }
 
 glm::mat4 SlipCamera::GetOrthographicMatrix()
@@ -73,17 +137,17 @@ void SlipCamera::ProcessKeyboard(Camera_Movement direction, float deltaTime)
 {
     float velocity = MovementSpeed * deltaTime;
     if (direction == FORWARD)
-        Position += Front * velocity;
+        this->position += Front * velocity;
     if (direction == BACKWARD)
-        Position -= Front * velocity;
+        this->position -= Front * velocity;
     if (direction == LEFT)
-        Position -= Right * velocity;
+        this->position -= Right * velocity;
     if (direction == RIGHT)
-        Position += Right * velocity;
+        this->position += Right * velocity;
     if (direction == DOWN)
-        Position -= Up * velocity;
+        this->position -= Up * velocity;
     if (direction == UP)
-        Position += Up * velocity;
+        this->position += Up * velocity;
 }
 
 void SlipCamera::ProcessWindow(float width, float height)
@@ -92,7 +156,7 @@ void SlipCamera::ProcessWindow(float width, float height)
     this->height = height;
 }
 
-void SlipCamera::ProcessMouseMovement(float xoffset, float yoffset, GLboolean constrainPitch)
+void SlipCamera::ProcessMouseMovement(float xoffset, float yoffset, bool constrainPitch)
 {
     xoffset *= MouseSensitivity;
     yoffset *= MouseSensitivity;

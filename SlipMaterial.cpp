@@ -3,6 +3,8 @@
 /*#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"*/
 
+#include "Engine.h"
+
 SlipMaterial SlipMaterial::generateMaterial(std::string code, const char* path)
 {
     std::string vertPath = code + ".vert";
@@ -144,10 +146,10 @@ void SlipMaterial::bind(glm::mat4 &model)
         shader.setFloat("lights[" + std::to_string(i) + "].quadratic", 0.032f);
     }*/
 
-    shader->setVec3("viewPos", SlipLevel::Camera.Position);
+    shader->setVec3("viewPos", Engine::Get().Level().GetCamera().position);
 
-    glm::mat4 proj = SlipLevel::Camera.GetProjectionMatrix();
-    glm::mat4 view = SlipLevel::Camera.GetViewMatrix();
+    glm::mat4 proj = Engine::Get().Level().GetCamera().GetProjectionMatrix();
+    glm::mat4 view = Engine::Get().Level().GetCamera().GetViewMatrix();
 
     shader->setMat4("projection", proj);
     shader->setMat4("view", view);
@@ -157,7 +159,6 @@ void SlipMaterial::bind(glm::mat4 &model)
     if (std::strlen(diffPath) != 0)
     {
         shader->setInt("texture_diffuse", 0);
-        glActiveTexture(GL_TEXTURE0);
         diffuseTexture->draw();
     }
 }

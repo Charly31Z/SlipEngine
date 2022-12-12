@@ -1,5 +1,21 @@
 #include "SlipModelExtract.h"
 
+#include <iostream>
+#include <fstream>
+#include <filesystem>
+
+#include "io.h"
+
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 std::string SlipModelExtract::writeMeshToCache(std::string& filepath, std::vector<SlipMesh::Mesh> meshes, std::vector<SlipMesh::Material> materials)
 {
     std::string mystr = filepath.substr(filepath.find("assets/")+7);
@@ -411,13 +427,10 @@ SlipMesh SlipModelExtract::extract(std::string filepath)
 
     for (int j = 0; j < scene->mNumMaterials; j++)
     {
-        aiMaterial* mat = scene->mMaterials[j];
-
-        aiString matName;
-        mat->Get(AI_MATKEY_NAME, matName);
+        std::string matName = "mat_" + std::to_string(j);
 
         char matPath[192] = "";
-        std::strcpy(matPath, writeMatToCache(filepath, matName.C_Str()).c_str());
+        std::strcpy(matPath, writeMatToCache(filepath, matName.c_str()).c_str());
 
         materials.emplace_back(matPath);
     }

@@ -1,5 +1,14 @@
 #include "SlipLevel.h"
 
+#include <fstream>
+#include <filesystem>
+#include <shlwapi.h>
+
+#include <assert.h>
+
+#include "SlipGlobals.h"
+#include "SlipActor.h"
+
 void SlipLevel::newLevel(std::string levelName)
 {
 	this->levelName = levelName;
@@ -46,6 +55,9 @@ void SlipLevel::openLevel(std::string levelName)
 	canDraw = false;
 	mBsp = nullptr;
 	models.clear();
+	entities.clear();
+
+	entities.push_back(m_Camera);
 
 	std::filesystem::path path(levelName);
 	std::string filename = path.stem().string();
@@ -121,22 +133,26 @@ void SlipLevel::draw()
 
 			for (int e = 0; e < entities.size(); e++)
 			{
-				entities[e].init();
+				entities[e]->ejecStart();
+				entities[e]->Update();
 
-				entities[e].draw();
-
-				if (entities[e].model->collision != nullptr)
+				if (SlipActor* p = dynamic_cast<SlipActor*>(entities[e]))
 				{
-					btTransform tempTrans{btQuaternion(entities[e].rotation.x, entities[e].rotation.y, entities[e].rotation.z), btVector3(entities[e].position.x, entities[e].position.y, entities[e].position.z)};
-					dynamicsWorld->debugDrawObject(tempTrans, entities[e].model->collision->collisionModel, btVector3(1.f, 0.f, 0.f));
+					p->draw();
+
+					if (p->model->collision != nullptr)
+					{
+						btTransform tempTrans{ btQuaternion(p->rotation.x, p->rotation.y, p->rotation.z), btVector3(p->position.x, p->position.y, p->position.z) };
+						dynamicsWorld->debugDrawObject(tempTrans, p->model->collision->collisionModel, btVector3(1.f, 0.f, 0.f));
+					}
 				}
 			}
 
-			dynamicsWorld->stepSimulation(Camera.dt);
+			dynamicsWorld->stepSimulation(SlipGlobals::Get().GetDeltaTime());
 
 			dynamicsWorld->debugDrawWorld();
 
-			debugCol->render(Camera);
+			debugCol->render(*m_Camera);
 		}
 		else
 		{
@@ -171,21 +187,27 @@ void SlipLevel::draw()
 
 			for (int e = 0; e < entities.size(); e++)
 			{
-				entities[e].init();
+				entities[e]->ejecStart();
+				entities[e]->Update();
 
-				if (!entities[e].initializedRigidBody)
+				if (SlipActor* p = dynamic_cast<SlipActor*>(entities[e]))
 				{
-					entities[e].initRigiedBody();
-					if (entities[e].model->collision != nullptr)
-					{
-						dynamicsWorld->addRigidBody(entities[e].model->collision->rigidBody);
-					}
-				}
+					p->init();
 
-				entities[e].draw();
+					if (!p->initializedRigidBody)
+					{
+						p->initRigiedBody();
+						if (p->model->collision != nullptr)
+						{
+							dynamicsWorld->addRigidBody(p->model->collision->rigidBody);
+						}
+					}
+
+					p->draw();
+				}
 			}
 
-			dynamicsWorld->stepSimulation(Camera.dt);
+			dynamicsWorld->stepSimulation(SlipGlobals::Get().GetDeltaTime());
 		}
 	}
 }
@@ -198,7 +220,10 @@ void SlipLevel::clean()
 
 		for (int e = 0; e < entities.size(); e++)
 		{
-			entities[e].model->clean();
+			if (SlipActor* p = dynamic_cast<SlipActor*>(entities[e]))
+			{
+				p->model->clean();
+			}
 		}
 
 		debugCol->clean();
@@ -220,10 +245,12 @@ int SlipLevel::searchModel(std::string path)
 
 SlipLevel::SlipLevel(std::string levelName)
 {
+	assert(!m_Instance && "Level has initialized...");
+	m_Instance = this;
 	this->levelName = levelName;
 
 	// camera
-	Camera = SlipCamera(glm::vec3(-6.f, 10.f, 15.f));
+	m_Camera = new SlipCamera(glm::vec3(-6.f, 10.f, 15.f));
 }
 
 void SlipLevel::playMode()

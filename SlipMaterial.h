@@ -9,11 +9,6 @@
 #include "SlipShader.h"
 #include "SlipCamera.h"
 #include "SlipTexture.h"
-#include "SlipLevel.h"
-
-class SlipLight;
-
-class SlipLevel;
 
 class SlipMaterial
 {

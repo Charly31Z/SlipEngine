@@ -43,7 +43,7 @@ public:
 
     struct Mesh
     {
-        GLuint VAO, VBO, EBO;
+        unsigned int VAO, VBO, EBO;
 
         int materialIndex;
         std::vector<Vertex>       vertices;

@@ -3,7 +3,6 @@
 #ifndef SLIP_UI_H
 #define SLIP_UI_H
 
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -31,7 +30,7 @@ private:
 	};
 
 	std::vector<Vertex> vertices;
-	std::vector<GLuint> indices;
+	std::vector<unsigned int> indices;
 	Texture texture;
 
 	SlipCamera& camera;
@@ -42,7 +41,7 @@ private:
 	void setupMesh();
 	void setupTexture();
 
-	GLuint VAO, VBO, EBO;
+	unsigned int VAO, VBO, EBO;
 public:
 	std::string name;
 

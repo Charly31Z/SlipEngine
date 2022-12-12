@@ -1,9 +1,8 @@
 #include "SlipTexture.h"
 
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include <glad/glad.h>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image.h"
 #include "stb_image_write.h"
 
 void SlipTexture::init()
@@ -41,5 +40,6 @@ void SlipTexture::init()
 
 void SlipTexture::draw()
 {
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ID);
 }

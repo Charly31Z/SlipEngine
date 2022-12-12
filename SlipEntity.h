@@ -1,4 +1,5 @@
 #pragma once
+
 #ifndef SLIP_ENTITY_H
 #define SLIP_ENTITY_H
 
@@ -8,32 +9,29 @@
 #include <glm/gtx/transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 
-#include "SlipMesh.h"
-#include "SlipMaterial.h"
-
 class SlipEntity
 {
-private:
+protected:
 	glm::vec3 oldPos = glm::vec3(1.0f);
 	glm::vec3 oldRot = glm::vec3(.0f);
 	glm::vec3 oldSca = glm::vec3(1.0f);
+private:
+	virtual void Start();
+	bool startFunEjec = false;
+
+	uint32_t id;
 public:
 	glm::vec3 position = glm::vec3(1.0f);
 	glm::vec3 rotation = glm::vec3(.0f);
 	glm::vec3 scale = glm::vec3(1.0f);
 
-	glm::mat4 getMatrix();
+	uint32_t GetId() { return id; }
 
-	std::string modelPath;
-	SlipMesh* model;
+	SlipEntity();
 
-	bool initializedRigidBody = false;
+	void ejecStart();
 
-	SlipEntity(std::string modelPath);
-
-	void init();
-	void initRigiedBody();
-	void draw();
+	virtual void Update();
 };
 
 #endif // !SLIP_ENTITY_H

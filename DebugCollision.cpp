@@ -1,5 +1,7 @@
 #include "DebugCollision.h"
 
+#include <glad/glad.h>
+
 DebugCollision::DebugCollision()
 {
 

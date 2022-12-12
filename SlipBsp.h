@@ -9,19 +9,10 @@
 #include <string>
 #include <windows.h>
 
-#include <glad/glad.h>
-#include <glm/glm.hpp>
-
 #include "SlipMesh.h"
 #include "SlipTexture.h"
-#include "SlipLevel.h"
 
-#include "io.h"
 #include <btBulletDynamicsCommon.h>
-
-class SlipLight;
-
-class SlipLevel;
 
 class SlipBsp
 {

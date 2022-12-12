@@ -3,14 +3,12 @@
 #ifndef SLIP_SHADER_H
 #define SLIP_SHADER_H
 
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #include <stdio.h>
 #include <stdint.h>
 #include <string>
-#include "io.h"
 
 class SlipShader
 {
