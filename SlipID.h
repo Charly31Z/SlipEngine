@@ -15,7 +15,7 @@ private:
 public:
 	inline static SlipID& Get() { return *m_Instance; }
 
-	void reset() { m_Instance = new SlipID(); }
+	void reset() { m_Id = 0; }
 
 	SlipID() : m_Id(0) {
 		assert(!m_Instance && "SlipID has initialized...");

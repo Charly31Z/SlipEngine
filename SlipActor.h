@@ -5,18 +5,21 @@
 
 #include <string>
 
+#include "SlipEngine.h"
+
 #include "SlipEntity.h"
 
 class SlipMesh;
 
-class SlipActor : public SlipEntity
+class SLIPENGINE_API SlipActor : public SlipEntity
 {
 public:
-	SlipActor(std::string modelPath);
+	SlipActor(const char* modelPath);
+	SlipActor();
 
 	glm::mat4 getMatrix();
 
-	std::string modelPath;
+	char modelPath[192];
 	SlipMesh* model;
 
 	bool initializedRigidBody = false;

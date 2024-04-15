@@ -5,6 +5,8 @@
 
 #include "SlipWindow.h"
 
+#include <ShlObj_core.h>
+
 namespace IO
 {
     std::string FileDialog::OpenFile(const char* filter)
@@ -41,6 +43,29 @@ namespace IO
         if (GetSaveFileNameA(&ofn) == TRUE)
         {
             return ofn.lpstrFile;
+        }
+        return std::string();
+    }
+    std::string FileDialog::OpenFolder()
+    {
+        BROWSEINFO binf = { 0 };
+        TCHAR szFolder[260] = { 0 };
+        ZeroMemory(&binf, sizeof(BROWSEINFO));
+        binf.hwndOwner = glfwGetWin32Window(&SlipWindow::Get().getWindow());
+
+        LPITEMIDLIST pidl = SHBrowseForFolder(&binf);
+
+        if (pidl != NULL)
+        {
+            if (SHGetPathFromIDList(pidl, szFolder) == TRUE)
+            {
+                std::wstring output = std::wstring(szFolder);
+                std::string str(output.begin(), output.end());
+                return str;
+            }
+
+            // — Free pidl
+            CoTaskMemFree(pidl);
         }
         return std::string();
     }

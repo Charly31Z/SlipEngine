@@ -24,13 +24,13 @@ const float SPEED = 2.5f;
 const float SENSITIVITY = 0.1f;
 const float ZOOM = 75.0f;
 
-class SlipCamera : public SlipEntity
+class SlipCamera
 {
 public:
-    void Start() {}
     void Update();
 
     // camera Attributes
+    glm::vec3 position;
     glm::vec3 Front;
     glm::vec3 Up;
     glm::vec3 Right;

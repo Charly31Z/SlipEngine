@@ -12,7 +12,7 @@
 #include "SlipMesh.h"
 #include "SlipTexture.h"
 
-#include <btBulletDynamicsCommon.h>
+#include "SlipCollision.h"
 
 class SlipBsp
 {
@@ -68,8 +68,8 @@ public:
 	SlipBsp(std::string path);
 
 	void initCol();
-	void init(SlipMesh skymesh);
-	void draw();
+	void init(SlipMesh& skymesh);
+	int draw();
 	void clean();
 };
 

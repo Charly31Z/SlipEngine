@@ -2,8 +2,14 @@
 
 #include "SlipMesh.h"
 
-SlipActor::SlipActor(std::string modelPath) : SlipEntity(), modelPath(modelPath)
-{}
+SlipActor::SlipActor(const char* modelPath) : SlipEntity()
+{
+	strcpy(this->modelPath, modelPath);
+}
+
+SlipActor::SlipActor()
+{
+}
 
 glm::mat4 SlipActor::getMatrix()
 {
@@ -32,14 +38,11 @@ void SlipActor::init()
 {
 	if (model == nullptr)
 	{
-		model = new SlipMesh(modelPath.c_str());
+		model = new SlipMesh(modelPath);
 
 		model->init();
 
-		if (model->collision != nullptr)
-		{
-			model->collision->init();
-		}
+		model->initColl();
 	}
 }
 
@@ -62,7 +65,7 @@ void SlipActor::Start()
 
 void SlipActor::initRigiedBody()
 {
-	if (model->collision != nullptr)
+	if (!initializedRigidBody && model->collision != nullptr)
 	{
 		model->collision->initRigidBody(oldPos, oldRot);
 	}

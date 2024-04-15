@@ -3,7 +3,9 @@
 /*#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"*/
 
-#include "Engine.h"
+#include "io.h"
+#include "SlipGlobals.h"
+#include "SlipShadows.h"
 
 SlipMaterial SlipMaterial::generateMaterial(std::string code, const char* path)
 {
@@ -61,59 +63,72 @@ SlipMaterial SlipMaterial::generateMaterial2(SlipShader shader, const char* path
 
 void SlipMaterial::loadMatFromFile(std::string path)
 {
-    std::ifstream input(path + ".material_cache", std::ios::binary);
+    std::ifstream input("cache/" + path + ".material_cache", std::ios::binary);
 
-    float v3[3];
+    assert(input.is_open() && "Error open material");
 
-    IO::read(input, v3);
-    color = glm::vec3(v3[0], v3[1], v3[2]);
-
-    IO::read(input, v3);
-    ambient = glm::vec3(v3[0], v3[1], v3[2]);
-
-    IO::read(input, v3);
-    specular = glm::vec3(v3[0], v3[1], v3[2]);
-
-    IO::read(input, shaderType);
-
-    IO::read(input, shininess);
-
-    IO::read(input, diffPath);
-
-    /*if (diffuseTexture.path)
+    if (input.is_open())
     {
-        createTexture("diff");
-    }*/
+        float v3[3];
 
-    input.close();
+        IO::read(input, v3);
+        color = glm::vec3(v3[0], v3[1], v3[2]);
+
+        IO::read(input, v3);
+        ambient = glm::vec3(v3[0], v3[1], v3[2]);
+
+        IO::read(input, v3);
+        specular = glm::vec3(v3[0], v3[1], v3[2]);
+
+        IO::read(input, shaderType);
+
+        IO::read(input, shininess);
+
+        IO::read(input, diffPath);
+
+        /*if (diffuseTexture.path)
+        {
+            createTexture("diff");
+        }*/
+
+        input.close();
+    }
 
     if (std::strlen(diffPath) != 0)
     {
-        std::string pathtxt = std::string(diffPath);
-        std::ifstream input(pathtxt + ".texture_cache", std::ios::binary);
+        std::string pathtxt = "cache/" + std::string(diffPath) + ".texture_cache";
+        std::ifstream input(pathtxt, std::ios::binary);
 
-        diffuseTexture = new SlipTexture();
+        assert(input.is_open() && "Error open texture");
 
-        IO::read(input, diffuseTexture->width);
-        IO::read(input, diffuseTexture->height);
-        IO::read(input, diffuseTexture->nrComponents);
-        IO::read(input, diffuseTexture->format);
+        if (input.is_open())
+        {
+            diffuseTexture = new SlipTexture();
 
-        IO::read(input, diffuseTexture->imgData.size);
+            IO::read(input, diffuseTexture->width);
+            IO::read(input, diffuseTexture->height);
+            IO::read(input, diffuseTexture->nrComponents);
+            IO::read(input, diffuseTexture->format);
 
-        diffuseTexture->imgData.data = new unsigned char[diffuseTexture->imgData.size];
-        input.read((char*)&diffuseTexture->imgData.data[0], diffuseTexture->imgData.size);
+            IO::read(input, diffuseTexture->imgData.size);
 
-        input.close();
+            diffuseTexture->imgData.data = new unsigned char[diffuseTexture->imgData.size];
+            input.read((char*)&diffuseTexture->imgData.data[0], diffuseTexture->imgData.size);
 
-        diffuseTexture->init();
+            diffuseTexture->init();
+
+            input.close();
+        }
     }
 }
 
 SlipMaterial::SlipMaterial(std::string path) : path(path)
 {
     loadMatFromFile(path);
+}
 
+void SlipMaterial::init()
+{
     std::string sType = std::string(shaderType);
     std::string vertPath = std::string("assets/shaders/" + sType + ".vert");
     std::string fragPath = std::string("assets/shaders/" + sType + ".frag");
@@ -125,8 +140,10 @@ void SlipMaterial::bind(glm::mat4 &model)
 {
     shader->use();
 
+    shader->setInt("shadowMap", 1);
+
+    shader->setVec3("material.color", color);
     shader->setVec3("material.ambient", ambient);
-    shader->setVec3("material.diffuse", color);
     shader->setVec3("material.specular", specular);
     shader->setFloat("material.shininess", shininess);
 
@@ -146,14 +163,22 @@ void SlipMaterial::bind(glm::mat4 &model)
         shader.setFloat("lights[" + std::to_string(i) + "].quadratic", 0.032f);
     }*/
 
-    shader->setVec3("viewPos", Engine::Get().Level().GetCamera().position);
+    //shader->setVec3("viewPos", SlipLevel::Get().GetCamera().position);
 
-    glm::mat4 proj = Engine::Get().Level().GetCamera().GetProjectionMatrix();
-    glm::mat4 view = Engine::Get().Level().GetCamera().GetViewMatrix();
+    glm::mat4 proj = SlipGlobals::Get().getProjection();
+    glm::mat4 view = SlipGlobals::Get().getView();
+
+    glm::mat4 lightSpace = SlipShadows::Get().getProjection() * SlipShadows::Get().getView();
+
+    glm::vec3 lightPos = SlipShadows::Get().lightPos;
 
     shader->setMat4("projection", proj);
     shader->setMat4("view", view);
     shader->setMat4("model", model);
+
+    shader->setVec3("viewPos", SlipGlobals::Get().getCamera().position);
+    shader->setVec3("lightPos", lightPos);
+    shader->setMat4("lightSpaceMatrix", lightSpace);
 
     // bind appropriate textures
     if (std::strlen(diffPath) != 0)

@@ -10,15 +10,14 @@
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 
-#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
 std::string SlipModelExtract::writeMeshToCache(std::string& filepath, std::vector<SlipMesh::Mesh> meshes, std::vector<SlipMesh::Material> materials)
 {
-    std::string mystr = filepath.substr(filepath.find("assets/")+7);
+    std::replace(filepath.begin(), filepath.end(), '\\', '/');
+
+    std::string mystr = filepath.substr(filepath.find("/assets/") + 8);
 
     std::filesystem::path path(mystr);
     std::string fileloc = path.parent_path().string() + "/" + path.stem().string();
@@ -125,7 +124,9 @@ std::string SlipModelExtract::writeMeshToCache(std::string& filepath, std::vecto
 
 std::string SlipModelExtract::writeMatToCache(std::string& filepath, const char* name)
 {
-    std::string mystr = filepath.substr(filepath.find("assets/") + 7);
+    std::replace(filepath.begin(), filepath.end(), '\\', '/');
+
+    std::string mystr = filepath.substr(filepath.find("/assets/") + 8);
 
     std::filesystem::path path(mystr);
     std::string fileloc = path.parent_path().string() + "/materials/" + name;
@@ -162,7 +163,7 @@ std::string SlipModelExtract::writeMatToCache(std::string& filepath, const char*
 
     outCache.close();
 
-    return "cache/" + fileloc;
+    return fileloc;
 }
 
 void SlipModelExtract::save(SlipMesh& ms, std::string filepath)
@@ -231,9 +232,27 @@ void SlipModelExtract::save(SlipCollision ms, std::string filepath)
         std::cout << "ERROR CREATING CACHE MODEL: " << filepath << ".model_cache" << std::endl;
 
     IO::write(outCache, ms.mass);
-    IO::write(outCache, ms.col_type);
 
-    IO::write(outCache, ms.scale);
+    size_t vertexCount = ms.vertices.size();
+    size_t indicesCount = ms.indices.size();
+
+    IO::write(outCache, vertexCount);
+    IO::write(outCache, indicesCount);
+
+    for (int j = 0; j < vertexCount; j++)
+    {
+        float v3[3];
+
+        v3[0] = ms.vertices[j].Position.x;
+        v3[1] = ms.vertices[j].Position.y;
+        v3[2] = ms.vertices[j].Position.z;
+        IO::write(outCache, v3);
+    }
+
+    for (int k = 0; k < indicesCount; k++)
+    {
+        IO::write(outCache, ms.indices[k]);
+    }
 
     outCache.close();
 }
@@ -358,10 +377,10 @@ void SlipModelExtract::save(SlipBsp bsp, std::string filepath)
     outCache.close();
 }
 
-SlipMesh SlipModelExtract::extract(std::string filepath)
+void SlipModelExtract::extract(std::string filepath)
 {
     Assimp::Importer importer;
-    const aiScene* scene = importer.ReadFile(filepath, aiProcess_Triangulate | aiProcess_FlipUVs);
+    const aiScene* scene = importer.ReadFile(filepath, aiProcess_OptimizeMeshes | aiProcess_JoinIdenticalVertices | aiProcess_Triangulate);
 
     if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode)
     {
@@ -435,59 +454,7 @@ SlipMesh SlipModelExtract::extract(std::string filepath)
         materials.emplace_back(matPath);
     }
 
-    SlipMesh outMesh{ writeMeshToCache(filepath, meshes, materials).c_str() };
-
-    return outMesh;
-}
-
-void SlipModelExtract::extractCol(std::string filepath)
-{
-    std::string mystr = filepath.substr(filepath.find("assets/") + 7);
-
-    std::filesystem::path path(mystr);
-    std::string fileloc = path.parent_path().string() + "/" + path.stem().string();
-
-    std::filesystem::create_directories("cache/" + path.parent_path().string());
-
-    std::ofstream outCache("cache/" + fileloc + ".physics_cache", std::ios::binary);
-
-    if (!outCache.is_open())
-        std::cout << "ERROR CREATING CACHE PHYSICS: " << "cache/" << fileloc.c_str() << ".physics_cache" << std::endl;
-
-    int mass = 3;
-    IO::write(outCache, mass);
-
-    SlipCollision::Collision_Type tempType = SlipCollision::BOX;
-    IO::write(outCache, tempType);
-
-    float v3[3] = { 0.25f, 0.25f, 0.25f };
-    IO::write(outCache, v3);
-
-    outCache.close();
-}
-
-void SlipModelExtract::extractFromPreCache(SlipLevel* lvl, std::string filepath)
-{
-    std::string mystr = filepath.substr(filepath.find("cache"));
-
-    std::filesystem::path path(mystr);
-
-    std::string file = path.parent_path().string() + "/" + path.stem().string() + path.extension().string();
-
-    if (path.extension().string() == ".model_cache")
-    {
-        SlipMesh outMesh{ file.c_str() };
-        lvl->models.push_back(outMesh);
-    }
-}
-
-void dummy_write(void* context, void* data, int len)
-{
-    ImageData* imgData = (ImageData*)context;
-
-    imgData->size = len;
-    imgData->data = new unsigned char[imgData->size];
-    memcpy(imgData->data, data, imgData->size);
+    writeMeshToCache(filepath, meshes, materials);
 }
 
 std::vector<Vertex> getVertices(std::string filepath)
@@ -501,6 +468,8 @@ std::vector<Vertex> getVertices(std::string filepath)
     {
         printf("ERROR::ASSIMP::%s", importer.GetErrorString());
     }
+
+    //for (aiMesh* mesh : scene->mMeshes)
 
     aiMesh* mesh = scene->mMeshes[0];
 
@@ -565,19 +534,107 @@ std::vector<unsigned int> getIndices(std::string filepath)
     return outIndices;
 }
 
+void SlipModelExtract::extractCol(std::string filepath)
+{
+    vertices.clear();
+    indices.clear();
+
+    std::string another = filepath;
+
+    std::replace(another.begin(), another.end(), '\\', '/');
+
+    std::string mystr = another.substr(another.find("/assets/") + 8);
+
+    std::filesystem::path path(mystr);
+    std::string fileloc = path.parent_path().string() + "/" + path.stem().string();
+
+    std::filesystem::create_directories("cache/" + path.parent_path().string());
+
+    std::ofstream outCache("cache/" + fileloc + ".physics_cache", std::ios::binary);
+
+    if (!outCache.is_open())
+        std::cout << "ERROR CREATING CACHE PHYSICS: " << "cache/" << fileloc.c_str() << ".physics_cache" << std::endl;
+
+    int mass = 3;
+    IO::write(outCache, mass);
+
+    vertices = getVertices(filepath);
+    indices = getIndices(filepath);
+
+    size_t vertexCount = vertices.size();
+    size_t indicesCount = indices.size();
+
+    IO::write(outCache, vertexCount);
+    IO::write(outCache, indicesCount);
+
+    for (int i = 0; i < vertexCount; i++)
+    {
+        float vx, vy, vz;
+
+        vx = vertices[i].Position.x;
+        vy = vertices[i].Position.y;
+        vz = vertices[i].Position.z;
+        IO::write(outCache, vx);
+        IO::write(outCache, vy);
+        IO::write(outCache, vz);
+    }
+
+    for (int j = 0; j < indicesCount; j++)
+    {
+        IO::write(outCache, indices[j]);
+    }
+
+    vertices.clear();
+    indices.clear();
+
+    outCache.close();
+}
+
+void SlipModelExtract::extractFromPreCache(SlipLevel* lvl, std::string filepath)
+{
+    std::string another = filepath;
+
+    std::replace(another.begin(), another.end(), '\\', '/');
+
+    std::string mystr = another.substr(another.find("/cache/") + 7);
+
+    std::filesystem::path path(mystr);
+
+    std::string file = path.parent_path().string() + "/" + path.stem().string();
+
+    if (path.extension().string() == ".model_cache")
+    {
+        SlipMesh* outMesh = new SlipMesh{ file.c_str() };
+        lvl->models.push_back(outMesh);
+    }
+}
+
+void dummy_write(void* context, void* data, int len)
+{
+    ImageData* imgData = (ImageData*)context;
+
+    imgData->size = len;
+    imgData->data = new unsigned char[imgData->size];
+    memcpy(imgData->data, data, imgData->size);
+}
+
 void SlipModelExtract::extractBsp(std::string filepath)
 {
     vertices.clear();
     indices.clear();
 
-    std::string mystr = filepath.substr(filepath.find("assets/"));
+    std::string another = filepath;
+
+    std::replace(another.begin(), another.end(), '\\', '/');
+
+    std::string mystr = another.substr(another.find("/assets/"));
     std::filesystem::path path(mystr);
 
     std::string filelocCol = path.parent_path().string() + "/" + path.stem().string() + "_collision" + path.extension().string();
 
     std::string filelocLightmap = path.parent_path().string() + "/textures/lightmap";
 
-    std::string mystr2 = filepath.substr(filepath.find("assets/")+7);
+    std::string mystr2 = another.substr(another.find("/assets/") + 8);
     std::filesystem::path path2(mystr2);
 
     std::string fileloc = path2.parent_path().string() + "/" + path2.stem().string();
@@ -718,7 +775,11 @@ void SlipModelExtract::extractTexture(std::string filepath)
         else if (texture.nrComponents == 4)
             texture.format = 1;
 
-        std::string mystr = filepath.substr(filepath.find("assets/") + 7);
+        std::string another = filepath;
+
+        std::replace(another.begin(), another.end(), '\\', '/');
+
+        std::string mystr = another.substr(another.find("/assets/") + 8);
 
         std::filesystem::path path(mystr);
         std::string fileloc = path.parent_path().string() + "/" + path.stem().string();

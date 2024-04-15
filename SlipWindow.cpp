@@ -3,7 +3,7 @@
 #include <iostream>
 #include <assert.h>
 
-#include "SlipFrameBuffer.h"
+#include <SlipFrameBuffer.h>
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
@@ -11,8 +11,10 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
     SlipWindow::Get().setHeight(height);
     glfwSetWindowSize(window, width, height);
     glViewport(0, 0, width, height);
-
-    SlipFrameBuffer::Get(0).updateSize();
+    if (&SlipFrameBuffer::Get() != nullptr)
+    {
+        SlipFrameBuffer::Get().resize();
+    }
 }
 
 SlipWindow::SlipWindow(const char* title, int width, int height) : title(title), width(width), height(height)
@@ -21,8 +23,8 @@ SlipWindow::SlipWindow(const char* title, int width, int height) : title(title),
     m_instance = this;
 
     glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     m_window = glfwCreateWindow(width, height, title, NULL, NULL);
@@ -37,14 +39,11 @@ SlipWindow::SlipWindow(const char* title, int width, int height) : title(title),
 
     glfwSetFramebufferSizeCallback(m_window, framebuffer_size_callback);
 
+    glfwSwapInterval(0);
+
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
         std::cout << "Failed to initialize GLAD" << std::endl;
         return;
     }
-
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }

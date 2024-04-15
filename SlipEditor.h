@@ -10,15 +10,17 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui_internal.h"
 
+#include <ImGuizmo.h>
+
 #include "SlipFrameBuffer.h"
 #include "SlipModelExtract.h"
+
+#include <time.h>
+#include <map>
 
 class SlipEditor
 {
 private:
-	int width;
-	int height;
-
 	enum property_type {
 		LEVEL,
 		BSP,
@@ -26,14 +28,20 @@ private:
 		COLLISION,
 		MATERIAL,
 		ENTITY,
+		SPAWN,
 		UI
 	};
+
+	bool fileManager;
 
 	bool hierarchy;
 	bool hierarchyOpen;
 
 	bool properties;
 	property_type prop = property_type::ENTITY;
+
+	bool existSpawn = false;
+	int spawnSelected;
 
 	bool existEnity = false;
 	const char* entity_mesh = NULL;
@@ -44,9 +52,6 @@ private:
 	int uiSelected;
 
 	int matSelected = 0;
-
-	/*std::vector<SlipEntity>& entities;
-	std::vector<SlipUI>& uis;*/
 
 	bool game;
 	bool mouseRClicked;
@@ -67,28 +72,68 @@ private:
 	int selectedType;
 	int selectedChildType;
 
+	float posSpa[3] = { 0.f, 0.f, 0.f };
+	float rotSpa[3] = { 0.f, 0.f, 0.f };
+
+	int teamSpa;
+
 	float posEnt[3] = { 0.f, 0.f, 0.f };
 	float rotEnt[3] = { 0.f, 0.f, 0.f };
 	float scaEnt[3] = { 1.f, 1.f, 1.f };
+
+	SlipCamera* camera;
+
+	/* IMGuizmo */
+	ImGuizmo::OPERATION mCurrentGizmoOperation = ImGuizmo::OPERATION::TRANSLATE;
+	ImGuizmo::MODE mCurrentGizmoMode = ImGuizmo::MODE::WORLD;
+	bool useSnap = true;
+	glm::vec3 snap{1.f};
+	glm::mat4 matrix;
+
+	glm::vec3 posGuizmo;
+	glm::vec3 rotGuizmo;
+	glm::vec3 scaGuizmo;
+
+	bool toolbar;
+
+	// Window Debug
+	bool debug;
+	int current_textItem;
+	std::vector<std::string> textItem;
+
+	std::map<const char*, SlipTexture*> icons;
+
+	bool playMode = false;
 
 	inline static SlipEditor* m_Instante;
 public:
 	inline static SlipEditor& Get() { return *m_Instante; }
 
+	bool& isPlayMode() { return playMode; }
+
 	bool mouseRPressed();
 
-	SlipEditor(int width, int height);
+	bool wireframe = false;
+
+	SlipEditor();
 
 	void init();
 
+	void loadIcons();
+
 	void startRender();
+	void renderGuizmo();
 	void renderHierarchy();
 	void renderProperties();
-	void renderGame(SlipFrameBuffer& frameBuffer);
+	void renderViewport(SlipFrameBuffer* framebuffer);
 	void renderScene();
-	void processWindow();
+	void renderDebug();
 	void processInput();
 	void endRender();
+
+	void print(std::string text);
+
+	SlipCamera& getViewportCamera() { return *camera; }
 };
 
 #endif // !SLIP_EDITOR_H

@@ -65,11 +65,12 @@ public:
     SlipMesh(const char* path);
 
     void init();
+    void initColl();
 
     void draw(glm::mat4 transform);
     void clean();
 private:
-    void loadFromFile(const char* path);
+    void loadFromFile();
     void loadColFromFile(std::string path);
     void loadMatFromFile();
     void setupMesh();

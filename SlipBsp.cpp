@@ -2,7 +2,11 @@
 
 #include "io.h"
 
-#include "Engine.h"
+#include "SlipWindow.h"
+
+#include "SlipGlobals.h"
+
+#include "SlipShadows.h"
 
 void SlipBsp::initCol()
 {
@@ -35,7 +39,7 @@ void SlipBsp::initCol()
 
 SlipBsp::SlipBsp(std::string path) : path(path)
 {
-	std::ifstream input(path + ".bsp_cache", std::ios::binary);
+	std::ifstream input("cache/" + path + ".bsp_cache", std::ios::binary);
 
     if (!input.is_open())
         std::cout << "ERROR READING BSP: " << path.c_str() << ".bsp_cache" << std::endl;
@@ -171,7 +175,7 @@ SlipBsp::SlipBsp(std::string path) : path(path)
 	input.close();
 }
 
-void SlipBsp::init(SlipMesh skymesh)
+void SlipBsp::init(SlipMesh& skymesh)
 {
     // create buffers/arrays
     glGenVertexArrays(1, &mesh.VAO);
@@ -229,8 +233,22 @@ void SlipBsp::init(SlipMesh skymesh)
     initialized = true;
 }
 
-void SlipBsp::draw()
+int SlipBsp::draw()
 {
+    if (SlipShadows::Get().calculating())
+    {
+        glDisable(GL_CULL_FACE);
+        glm::mat4 model = glm::mat4(1.0f);
+        SlipShadows::Get().getShader()->setMat4("model", model);
+
+        glBindVertexArray(mesh.VAO);
+        glDrawElements(GL_TRIANGLES, static_cast<unsigned int>(mesh.indices.size()), GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+
+        glEnable(GL_CULL_FACE);
+        return 1;
+    }
+
     if (skybox != nullptr)
     {
         glm::mat4 model = glm::mat4(1.0f);
@@ -244,8 +262,8 @@ void SlipBsp::draw()
     glActiveTexture(GL_TEXTURE0);
     mesh.mat.lightmaps[0].draw();
 
-    glm::mat4 proj = Engine::Get().GetPrimaryCamera().GetProjectionMatrix();
-    glm::mat4 view = Engine::Get().GetPrimaryCamera().GetViewMatrix();
+    glm::mat4 proj = SlipGlobals::Get().getProjection();
+    glm::mat4 view = SlipGlobals::Get().getView();
 
     shader->setMat4("projection", proj);
     shader->setMat4("view", view);
@@ -264,6 +282,8 @@ void SlipBsp::draw()
     btTransform trans;
     trans = coll.rigidBody->getWorldTransform();
     trans.getOpenGLMatrix(transform);
+
+    return 0;
 }
 
 void SlipBsp::clean()

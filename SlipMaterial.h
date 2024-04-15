@@ -36,6 +36,7 @@ public:
 
 	SlipMaterial(std::string path);
 
+	void init();
 	void bind(glm::mat4& model);
 };
 

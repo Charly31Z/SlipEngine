@@ -16,6 +16,7 @@ public:
 	unsigned int ID;
 
 	SlipShader(const char* vertexPath, const char* fragmentPath);
+	SlipShader(const char* vertexPath, const char* fragmentPath, const char* tessellationControlPath, const char* tessellationEvaluationPath);
 
 	void use();
 	void destroy();

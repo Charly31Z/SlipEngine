@@ -22,7 +22,7 @@ public:
 	void save(SlipMaterial ms, std::string filepath);
 	void save(SlipBsp bsp, std::string filepath);
 	
-	SlipMesh extract(std::string filepath);
+	void extract(std::string filepath);
 	void extractCol(std::string filepath);
 	void extractBsp(std::string filepath);
 	void extractTexture(std::string filepath);

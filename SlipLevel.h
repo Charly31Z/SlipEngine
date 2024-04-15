@@ -6,26 +6,16 @@
 #include <vector>
 #include <string>
 
+#include "SlipTerrain.h"
+#include "SlipActor.h"
 #include "SlipEntity.h"
 #include "SlipBsp.h"
 
-#include "DebugCollision.h"
-
-#include <btBulletDynamicsCommon.h>
+#include "SlipSpawn.h"
 
 class SlipLevel
 {
 private:
-	btBroadphaseInterface* broadphase;
-	btDefaultCollisionConfiguration* collisionConfiguration;
-	btCollisionDispatcher* dispatcher;
-	btSequentialImpulseConstraintSolver* solver;
-	btDiscreteDynamicsWorld* dynamicsWorld;
-
-	DebugCollision* debugCol;
-
-	bool playing = false;
-
 	inline static SlipCamera* m_Camera;
 
 	inline static SlipLevel* m_Instance;
@@ -34,26 +24,34 @@ public:
 	
 	inline static SlipCamera& GetCamera() { return *m_Camera; }
 
-	std::string levelName;
+	void SetCamera(SlipCamera& camera) { m_Camera = &camera; }
+
+	std::string path;
 
 	bool canDraw = false;
 
-	char bsp[192] = "";
+	bool debugMode = true;
 
-	SlipBsp* mBsp;
-	std::vector<SlipMesh> models;
+	char bspPath[192] = "";
+	SlipBsp* bsp;
+
+	SlipTerrain* terrain;
+
+	std::vector<SlipMesh*> models;
+	std::vector<SlipMesh> debugModels;
+	std::vector<SlipSpawn*> spawns;
 	std::vector<SlipEntity*> entities;
 	//std::vector<SlipEntity> spawnLocation;
 
-	SlipLevel(std::string levelName);
+	SlipLevel();
 
-	void playMode();
-	bool isPlaying() { return playing; }
-
-	void newLevel(std::string levelName);
+	void newLevel(std::string path);
 	void saveLevel();
-	void openLevel(std::string levelName);
+	int openLevel(std::string path);
 
+	void apply();
+
+	void scripts();
 	void draw();
 	void clean();
 

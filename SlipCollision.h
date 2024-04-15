@@ -3,12 +3,12 @@
 #ifndef SLIP_COLLISION_H
 #define SLIP_COLLISION_H
 
-#include "glm/glm.hpp"
+#include "SlipShader.h"
 #include <vector>
 
 #include "io.h"
 
-#include <btBulletDynamicsCommon.h>
+#include "SlipPhysics.h"
 
 class SlipCollision
 {
@@ -17,27 +17,19 @@ private:
         glm::vec3 Position;
     };
 public:
-	enum Collision_Type
-	{
-		BOX,
-		SPHERE,
-		CAPSULE,
-		CONE,
-		CYLINDER
-	};
+	std::vector<Vertex> vertices;
+	std::vector<unsigned int> indices;
+
+	btCollisionShape* collisionShape;
+	btRigidBody* rigidBody;
 
 	std::string path;
 
 	int mass = 3;
-	Collision_Type col_type;
 
 	float scale[3];
 
-	btCollisionShape* collisionModel;
-
 	btDefaultMotionState* motionstate;
-
-	btRigidBody* rigidBody;
 
 	void init();
 	void initRigidBody(glm::vec3 pos, glm::vec3 rot);

@@ -8,31 +8,33 @@
 
 #include "SlipGlobals.h"
 
-#include "SlipEditor.h"
+#include "SlipWindow.h"
 
 void SlipCamera::Update()
 {
+    /*if (SlipInput::Get().GetKey(GLFW_KEY_W) == GLFW_PRESS)
+        ProcessKeyboard(Camera_Movement::FORWARD, SlipGlobals::Get().GetDeltaTime());
+    if (SlipInput::Get().GetKey(GLFW_KEY_A) == GLFW_PRESS)
+        ProcessKeyboard(Camera_Movement::LEFT, SlipGlobals::Get().GetDeltaTime());
+    if (SlipInput::Get().GetKey(GLFW_KEY_S) == GLFW_PRESS)
+        ProcessKeyboard(Camera_Movement::BACKWARD, SlipGlobals::Get().GetDeltaTime());
+    if (SlipInput::Get().GetKey(GLFW_KEY_D) == GLFW_PRESS)
+        ProcessKeyboard(Camera_Movement::RIGHT, SlipGlobals::Get().GetDeltaTime());
+    if (SlipInput::Get().GetKey(GLFW_KEY_E) == GLFW_PRESS)
+        ProcessKeyboard(Camera_Movement::UP, SlipGlobals::Get().GetDeltaTime());
+    if (SlipInput::Get().GetKey(GLFW_KEY_Q) == GLFW_PRESS)
+        ProcessKeyboard(Camera_Movement::DOWN, SlipGlobals::Get().GetDeltaTime());
+    if (SlipInput::Get().GetKey(GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+        MovementSpeed = 30.f;
+    if (SlipInput::Get().GetKey(GLFW_KEY_LEFT_SHIFT) == GLFW_RELEASE)
+        MovementSpeed = 2.5f;*/
+
+    if (SlipInput::Get().GetKey(GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        glfwDestroyWindow(&SlipWindow::Get().getWindow());
+
     if (canMove)
     {
-        if (SlipInput::Get().GetKey(GLFW_KEY_W) == GLFW_PRESS)
-            ProcessKeyboard(Camera_Movement::FORWARD, SlipGlobals::Get().GetDeltaTime());
-        if (SlipInput::Get().GetKey(GLFW_KEY_A) == GLFW_PRESS)
-            ProcessKeyboard(Camera_Movement::LEFT, SlipGlobals::Get().GetDeltaTime());
-        if (SlipInput::Get().GetKey(GLFW_KEY_S) == GLFW_PRESS)
-            ProcessKeyboard(Camera_Movement::BACKWARD, SlipGlobals::Get().GetDeltaTime());
-        if (SlipInput::Get().GetKey(GLFW_KEY_D) == GLFW_PRESS)
-            ProcessKeyboard(Camera_Movement::RIGHT, SlipGlobals::Get().GetDeltaTime());
-        if (SlipInput::Get().GetKey(GLFW_KEY_E) == GLFW_PRESS)
-            ProcessKeyboard(Camera_Movement::UP, SlipGlobals::Get().GetDeltaTime());
-        if (SlipInput::Get().GetKey(GLFW_KEY_Q) == GLFW_PRESS)
-            ProcessKeyboard(Camera_Movement::DOWN, SlipGlobals::Get().GetDeltaTime());
-        if (SlipInput::Get().GetKey(GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-            MovementSpeed = 30.f;
-        if (SlipInput::Get().GetKey(GLFW_KEY_LEFT_SHIFT) == GLFW_RELEASE)
-            MovementSpeed = 2.5f;
-
         glm::vec2 posMouse = SlipInput::Get().GetMousePos();
-        glm::vec2* scrollMouse = &SlipInput::Get().GetMouseScroll();
 
         if (firstMouse)
         {
@@ -47,12 +49,14 @@ void SlipCamera::Update()
         lastY = posMouse.y;
 
         ProcessMouseMovement(xoffset, yoffset);
-
-        if (scrollMouse != nullptr)
-            ProcessMouseScroll(scrollMouse->y);
     }
 
-    if (SlipEditor::Get().mouseRPressed())
+    glm::vec2* scrollMouse = &SlipInput::Get().GetMouseScroll();
+
+    if (scrollMouse != nullptr)
+        ProcessMouseScroll(scrollMouse->y);
+
+    if (SlipInput::Get().GetMouseButton(1) == GLFW_PRESS)
     {
         canMove = true;
     }
@@ -64,7 +68,7 @@ void SlipCamera::Update()
     ProcessWindow(SlipWindow::Get().getWidth(), SlipWindow::Get().getHeight());
 }
 
-SlipCamera::SlipCamera(glm::vec3 position, glm::vec3 up, float yaw, float pitch) : SlipEntity(), Front(glm::vec3(0.0f, 0.0f, -1.0f)), MovementSpeed(SPEED), MouseSensitivity(SENSITIVITY), Zoom(ZOOM)
+SlipCamera::SlipCamera(glm::vec3 position, glm::vec3 up, float yaw, float pitch) : Front(glm::vec3(0.0f, 0.0f, -1.0f)), MovementSpeed(SPEED), MouseSensitivity(SENSITIVITY), Zoom(ZOOM)
 {
     this->position = position;
     WorldUp = up;
@@ -130,7 +134,8 @@ glm::mat4 SlipCamera::GetProjectionMatrix()
 glm::mat4 SlipCamera::GetOrthographicMatrix()
 {
     float aspect = (float)width / height;
-    return glm::ortho(-aspect, aspect, -1.0f, 1.0f);
+    return glm::ortho(-aspect, aspect, -10.0f, 20.0f);
+    //return glm::ortho(0.f, (float)SlipWindow::Get().getWidth(), 0.f, (float)SlipWindow::Get().getHeight());
 }
 
 void SlipCamera::ProcessKeyboard(Camera_Movement direction, float deltaTime)
@@ -180,8 +185,8 @@ void SlipCamera::ProcessMouseMovement(float xoffset, float yoffset, bool constra
 void SlipCamera::ProcessMouseScroll(float yoffset)
 {
     Zoom -= (float)yoffset;
-    if (Zoom < 1.0f)
-        Zoom = 1.0f;
+    if (Zoom < 20.0f)
+        Zoom = 20.0f;
     if (Zoom > 75.0f)
         Zoom = 75.0f;
 }

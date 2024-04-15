@@ -14,9 +14,63 @@
 #include "SlipCamera.h"
 #include "SlipShader.h"
 
-class SlipUI
+#include <map>
+
+#ifndef SLIP_INSPECTOR
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#endif // !SLIP_INSPECTOR
+
+class SlipUIInterface
+{
+public:
+	glm::vec2 position;
+	float rotation;
+	glm::vec2 scale{ 1.f };
+
+	glm::vec3 color{ 1.f };
+
+	virtual void draw() {}
+};
+
+class SlipUIText : public SlipUIInterface
 {
 private:
+	glm::mat4 getModelMatrix();
+
+	struct Character
+	{
+		unsigned int TextureID;  // ID handle of the glyph texture
+		glm::ivec2   Size;       // Size of glyph
+		glm::ivec2   Bearing;    // Offset from baseline to left/top of glyph
+		unsigned int Advance;    // Offset to advance to next glyph
+	};
+
+	std::map<char, Character> Characters;
+
+#ifndef SLIP_INSPECTOR
+	FT_Face face;
+	FT_Library ft;
+#endif // !SLIP_INSPECTOR
+
+	unsigned int VAO, VBO;
+public:
+	std::string text;
+
+	SlipShader* shader;
+
+	void setupMesh();
+
+	SlipUIText();
+
+	void draw();
+};
+
+class SlipUIImage : public SlipUIInterface
+{
+private:
+	glm::mat4 getModelMatrix();
+public:
 	struct Texture
 	{
 		unsigned int id;
@@ -33,22 +87,34 @@ private:
 	std::vector<unsigned int> indices;
 	Texture texture;
 
-	SlipCamera& camera;
-	SlipShader shader{ "assets/shaders/ui.vert", "assets/shaders/ui.frag" };
-
-	glm::mat4 getModelMatrix();
+	SlipShader* shader;
 
 	void setupMesh();
 	void setupTexture();
 
 	unsigned int VAO, VBO, EBO;
+
+	void draw();
+};
+
+class SlipUI
+{
+private:
+	std::map<std::string, SlipUIInterface*> elements;
+
+	inline static SlipUI *m_Instance;
 public:
-	std::string name;
 
-	glm::vec2 position;
-	glm::vec2 scale{ 1.f };
+	SlipUI();
 
-	SlipUI(std::string name, SlipCamera& camera, glm::vec2 position, std::string texturePath);
+	SlipUI& Get() { return *m_Instance; }
+
+	SlipUIInterface& Find(std::string name);
+
+	SlipUIImage& image(std::string name, std::string texturePath, glm::vec2 position);
+	SlipUIImage& image(std::string name, unsigned int texture, glm::vec2 position);
+
+	SlipUIText* text(std::string name, std::string text, glm::vec2 position);
 
 	void draw();
 };

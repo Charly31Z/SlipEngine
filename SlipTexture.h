@@ -23,8 +23,12 @@ public:
 
 	ImageData imgData;
 
+	SlipTexture* load(const char* image);
+
 	void init();
 	void draw();
+
+	unsigned int& getId() { return ID; }
 };
 
 #endif // !SLIP_TEXTURE_H

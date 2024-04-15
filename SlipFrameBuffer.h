@@ -23,27 +23,29 @@ private:
 
 	unsigned int fbo, rbo;
 
+	unsigned int texture;
+
 	SlipShader* shader;
 
 	void initMesh();
 	void initFramebuffer();
 
-	inline static std::vector<SlipFrameBuffer*> m_Instances;
+	inline static SlipFrameBuffer* m_Instance;
 public:
-	inline static SlipFrameBuffer& Get(int index) { return *m_Instances[index]; }
+	inline static SlipFrameBuffer& Get() { return *m_Instance; }
 
-	unsigned int textureColorBuffer;
+	unsigned int& getTexture() { return texture; }
 
 	SlipFrameBuffer();
 
 	void init();
-
-	void updateSize();
+	void resize();
 
 	void bind();
 	void unbind();
 
 	void draw();
+	void clean();
 };
 
 #endif // !SLIP_FRAMEBUFFER_H

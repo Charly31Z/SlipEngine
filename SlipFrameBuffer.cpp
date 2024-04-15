@@ -42,12 +42,14 @@ void SlipFrameBuffer::initFramebuffer()
 	glGenFramebuffers(1, &fbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
-	glGenTextures(1, &textureColorBuffer);
-	glBindTexture(GL_TEXTURE_2D, textureColorBuffer);
+	glGenTextures(1, &texture);
+	glBindTexture(GL_TEXTURE_2D, texture);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, SlipWindow::Get().getWidth(), SlipWindow::Get().getHeight(), 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textureColorBuffer, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
 
 	glGenRenderbuffers(1, &rbo);
 	glBindRenderbuffer(GL_RENDERBUFFER, rbo);
@@ -58,21 +60,18 @@ void SlipFrameBuffer::initFramebuffer()
 		std::cout << "ERROR::FRAMEBUFFER:: Framebuffer is not complete!" << std::endl;
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	shader->use();
-
-	shader->setInt("screenTexture", 0);
 }
 
 SlipFrameBuffer::SlipFrameBuffer()
 {
-	m_Instances.push_back(this);
+	assert(!m_Instance && "SlipFramebuffer has initialized...");
+	m_Instance = this;
 
 	vertices = {
 		Vertex{glm::vec2(1.f,  1.f), glm::vec2(1.0f, 1.0f)},
 		Vertex{glm::vec2(1.f, -1.f), glm::vec2(1.0f, 0.0f)},
-		Vertex{glm::vec2(-1.f, -1.f), glm::vec2(0.0f, 0.0f)},
-		Vertex{glm::vec2(-1.f,  1.f), glm::vec2(0.0f, 1.0f)}
+		Vertex{glm::vec2(-1.f,-1.f), glm::vec2(0.0f, 0.0f)},
+		Vertex{glm::vec2(-1.f, 1.f), glm::vec2(0.0f, 1.0f)}
 	};
 
 	indices = {
@@ -83,30 +82,27 @@ SlipFrameBuffer::SlipFrameBuffer()
 
 void SlipFrameBuffer::init()
 {
-	SlipShader s{"assets/shaders/screen.vert", "assets/shaders/screen.frag"};
-	shader = &s;
+	shader = new SlipShader("assets/shaders/screen.vert", "assets/shaders/screen.frag");
 
 	initMesh();
 	initFramebuffer();
 }
 
-void SlipFrameBuffer::updateSize()
+void SlipFrameBuffer::resize()
 {
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
-	glBindTexture(GL_TEXTURE_2D, textureColorBuffer);
+	glBindTexture(GL_TEXTURE_2D, texture);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, SlipWindow::Get().getWidth(), SlipWindow::Get().getHeight(), 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textureColorBuffer, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
 
-	glGenRenderbuffers(1, &rbo);
 	glBindRenderbuffer(GL_RENDERBUFFER, rbo);
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, SlipWindow::Get().getWidth(), SlipWindow::Get().getHeight());
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
-
-	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		std::cout << "ERROR::FRAMEBUFFER:: Framebuffer is not complete!" << std::endl;
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -125,7 +121,21 @@ void SlipFrameBuffer::draw()
 {
 	shader->use();
 
+	shader->setInt("screenTexture", 0);
+
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, texture);
+
 	glBindVertexArray(VAO);
-	glBindTexture(GL_TEXTURE_2D, textureColorBuffer);
 	glDrawElements(GL_TRIANGLES, static_cast<unsigned int>(indices.size()), GL_UNSIGNED_INT, 0);
+	glBindVertexArray(0);
+}
+
+void SlipFrameBuffer::clean()
+{
+	glDeleteVertexArrays(1, &VAO);
+	glDeleteBuffers(1, &VBO);
+	glDeleteBuffers(1, &EBO);
+	glDeleteFramebuffers(1, &fbo);
+	shader->destroy();
 }

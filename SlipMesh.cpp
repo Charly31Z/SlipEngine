@@ -1,19 +1,36 @@
 #include "SlipMesh.h"
 
+#include "SlipShadows.h"
+
+#include "SlipGlobals.h"
+
 #include <glad/glad.h>
 
 void SlipMesh::init()
 {
     setupMesh();
 
+    for (int i = 0; i < materials.size(); i++)
+    {
+        materials[i].mat->init();
+    }
+
     initialized = true;
+}
+
+void SlipMesh::initColl()
+{
+    if (collision != nullptr)
+    {
+        collision->init();
+    }
 }
 
 SlipMesh::SlipMesh(const char* path)
 {
     this->path = path;
 
-    loadFromFile(path);
+    loadFromFile();
     loadColFromFile(colPath);
     loadMatFromFile();
 }
@@ -38,81 +55,101 @@ void SlipMesh::draw(glm::mat4 transform)
 {
     for (int i = 0; i < meshes.size(); i++)
     {
-        glm::mat4 model = glm::mat4(1.f) * transform;
+        if (SlipShadows::Get().calculating())
+        {
+            SlipShadows::Get().getShader()->setMat4("model", transform);
 
-        materials[meshes[i].materialIndex].mat->bind(model);
+            //glActiveTexture(GL_TEXTURE0);
 
-        // draw mesh
-        glBindVertexArray(meshes[i].VAO);
-        glDrawElements(GL_TRIANGLES, static_cast<unsigned int>(meshes[i].indices.size()), GL_UNSIGNED_INT, 0);
-        glBindVertexArray(0);
+            // draw mesh
+            glBindVertexArray(meshes[i].VAO);
+            glDrawElements(GL_TRIANGLES, static_cast<unsigned int>(meshes[i].indices.size()), GL_UNSIGNED_INT, 0);
+            glBindVertexArray(0);
+        }
+        else {
+            materials[meshes[i].materialIndex].mat->bind(transform);
 
-        glActiveTexture(GL_TEXTURE0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, SlipShadows::Get().getDepthMap());
+
+            // draw mesh
+            glBindVertexArray(meshes[i].VAO);
+            glDrawElements(GL_TRIANGLES, static_cast<unsigned int>(meshes[i].indices.size()), GL_UNSIGNED_INT, 0);
+            glBindVertexArray(0);
+        }
+
+        //glActiveTexture(GL_TEXTURE0);
     }
 }
 
-void SlipMesh::loadFromFile(const char* path)
+void SlipMesh::loadFromFile()
 {
-    std::ifstream input1(path, std::ios::binary);
+    std::string out = "cache/" + std::string(path) + ".model_cache";
+    std::ifstream input1(out, std::ios::binary);
 
-    size_t meshesCount;
-    IO::read(input1, meshesCount);
+    assert(input1.is_open() && "Error open model");
 
-    for (int i = 0; i < meshesCount; i++)
+    if (input1.is_open())
     {
-        Mesh tempMesh;
+        size_t meshesCount;
+        IO::read(input1, meshesCount);
 
-        size_t vertexCount;
-        size_t indicesCount;
-
-        IO::read(input1, tempMesh.materialIndex);
-        IO::read(input1, vertexCount);
-        IO::read(input1, indicesCount);
-
-        for (int j = 0; j < vertexCount; j++)
+        for (int i = 0; i < meshesCount; i++)
         {
-            Vertex vertex;
+            Mesh tempMesh;
 
-            float v3[3];
-            float v2[2];
+            size_t vertexCount;
+            size_t indicesCount;
 
-            IO::read(input1, v3);
-            vertex.Position = glm::vec3(v3[0], v3[1], v3[2]);
+            IO::read(input1, tempMesh.materialIndex);
+            IO::read(input1, vertexCount);
+            IO::read(input1, indicesCount);
 
-            IO::read(input1, v3);
-            vertex.Normal = glm::vec3(v3[0], v3[1], v3[2]);
+            for (int j = 0; j < vertexCount; j++)
+            {
+                Vertex vertex;
 
-            IO::read(input1, v2);
-            vertex.TexCoords = glm::vec2(v2[0], v2[1]);
+                float v3[3];
+                float v2[2];
 
-            tempMesh.vertices.push_back(vertex);
+                IO::read(input1, v3);
+                vertex.Position = glm::vec3(v3[0], v3[1], v3[2]);
+
+                IO::read(input1, v3);
+                vertex.Normal = glm::vec3(v3[0], v3[1], v3[2]);
+
+                IO::read(input1, v2);
+                vertex.TexCoords = glm::vec2(v2[0], v2[1]);
+
+                tempMesh.vertices.push_back(vertex);
+            }
+
+            for (int k = 0; k < indicesCount; k++)
+            {
+                unsigned int index;
+
+                IO::read(input1, index);
+                tempMesh.indices.push_back(index);
+            }
+
+            meshes.push_back(tempMesh);
         }
 
-        for (int k = 0; k < indicesCount; k++)
-        {
-            unsigned int index;
+        IO::read(input1, colPath);
 
-            IO::read(input1, index);
-            tempMesh.indices.push_back(index);
+        size_t materialsCount;
+        IO::read(input1, materialsCount);
+
+        for (int i = 0; i < materialsCount; i++)
+        {
+            char matPath[192];
+
+            IO::read(input1, matPath);
+            materials.emplace_back(matPath);
         }
 
-        meshes.push_back(tempMesh);
+        input1.close();
     }
-
-    IO::read(input1, colPath);
-
-    size_t materialsCount;
-    IO::read(input1, materialsCount);
-
-    for (int i = 0; i < materialsCount; i++)
-    {
-        char matPath[192];
-
-        IO::read(input1, matPath);
-        materials.emplace_back(matPath);
-    }
-
-    input1.close();
 }
 
 void SlipMesh::loadColFromFile(std::string path)

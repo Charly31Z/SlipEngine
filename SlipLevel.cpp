@@ -4,34 +4,47 @@
 #include <filesystem>
 #include <shlwapi.h>
 
-#include <assert.h>
-
+#include "SlipPhysics.h"
 #include "SlipGlobals.h"
 #include "SlipActor.h"
 
-void SlipLevel::newLevel(std::string levelName)
+#include "FileDialog.h"
+
+#include "SlipID.h"
+#include <SlipDebug.h>
+
+#ifdef SLIP_EDITOR
+#include "SlipEditor.h"
+#endif
+
+void SlipLevel::newLevel(std::string path)
 {
-	this->levelName = levelName;
+	this->path = path;
 
-	mBsp = nullptr;
+	entities.clear();
+	spawns.clear();
 
-	std::fill(std::begin(bsp), std::end(bsp), '\0');
+	std::fill(std::begin(bspPath), std::end(bspPath), '\0');
 
 	models.clear();
+
+	SlipPhysics::Get().clean();
+	SlipID::Get().reset();
+
+#ifdef SLIP_EDITOR
+	SlipEditor::Get().print("Loaded level: " + path);
+#endif
 
 	canDraw = true;
 }
 
 void SlipLevel::saveLevel()
 {
-	std::string savingPathFolder = "cache\\levels\\" + levelName;
+	std::string savingPathFolder = IO::FileDialog::SaveFile("Level Cache (*.level_cache)\0 *.level_cache;");
 
-	if (!std::filesystem::is_directory(savingPathFolder))
-		std::filesystem::create_directory(savingPathFolder);
+	std::ofstream out(savingPathFolder, std::ios::binary);
 
-	std::ofstream out(savingPathFolder + "\\" + levelName + ".level_cache");
-
-	IO::write(out, bsp);
+	IO::write(out, bspPath);
 
 	size_t modelCount = models.size();
 
@@ -42,34 +55,102 @@ void SlipLevel::saveLevel()
 		for (int i = 0; i < modelCount; i++)
 		{
 			char cachePathMesh[192];
-			strncpy(cachePathMesh, models[i].path.c_str(), sizeof(cachePathMesh));
+			strncpy(cachePathMesh, models[i]->path.c_str(), sizeof(cachePathMesh));
 			IO::write(out, cachePathMesh);
 		}
 	}
 
+	size_t spawnCount = spawns.size();
+
+	IO::write(out, spawnCount);
+
+	if (!spawns.empty())
+	{
+		for (int i = 0; i < spawnCount; i++)
+		{
+			float juas[3];
+
+			juas[0] = spawns[i]->position.x;
+			juas[1] = spawns[i]->position.y;
+			juas[2] = spawns[i]->position.z;
+			IO::write(out, juas);
+
+			juas[0] = spawns[i]->rotation.x;
+			juas[1] = spawns[i]->rotation.y;
+			juas[2] = spawns[i]->rotation.z;
+			IO::write(out, juas);
+			IO::write(out, spawns[i]->team);
+		}
+	}
+
+	size_t entitiesCount = entities.size();
+	IO::write(out, entitiesCount);
+
+	if (!entities.empty())
+	{
+		for (int i = 0; i < entitiesCount; i++)
+		{
+			float juas[3];
+
+			juas[0] = entities[i]->position.x;
+			juas[1] = entities[i]->position.y;
+			juas[2] = entities[i]->position.z;
+			IO::write(out, juas);
+
+			juas[0] = entities[i]->rotation.x;
+			juas[1] = entities[i]->rotation.y;
+			juas[2] = entities[i]->rotation.z;
+			IO::write(out, juas);
+
+			juas[0] = entities[i]->scale.x;
+			juas[1] = entities[i]->scale.y;
+			juas[2] = entities[i]->scale.z;
+			IO::write(out, juas);
+
+			if (SlipActor* p = dynamic_cast<SlipActor*>(entities[i]))
+			{
+				for (int n = 0; n < modelCount; n++)
+				{
+					if (p->modelPath == models[n]->path)
+					{
+						IO::write(out, n);
+					}
+				}
+			}
+		}
+	}
+
+	IO::write(out, terrain->heightfieldIMG);
+	IO::write(out, terrain->collisionPath);
+
 	out.close();
 }
 
-void SlipLevel::openLevel(std::string levelName)
+int SlipLevel::openLevel(std::string path)
 {
+	if (path.empty())
+		return 0;
+
 	canDraw = false;
-	mBsp = nullptr;
 	models.clear();
 	entities.clear();
+	spawns.clear();
 
-	entities.push_back(m_Camera);
+	SlipPhysics::Get().clean();
+	SlipID::Get().reset();
 
-	std::filesystem::path path(levelName);
-	std::string filename = path.stem().string();
+	//entities.push_back(m_Camera);
 
-	this->levelName = filename;
+	this->path = path;
 
-	std::ifstream input("cache/levels/" + filename + "/" + filename + ".level_cache", std::ios::binary);
+	std::ifstream input(path, std::ios::binary);
 
-	IO::read(input, bsp);
+	IO::read(input, bspPath);
 
-	if (std::strlen(bsp) != 0)
-		mBsp = new SlipBsp(bsp);
+	if (std::strlen(bspPath) != 0)
+	{
+		bsp = new SlipBsp(bspPath);
+	}
 
 	size_t modelCount;
 
@@ -79,84 +160,183 @@ void SlipLevel::openLevel(std::string levelName)
 	{
 		char cachePathMesh[192];
 		IO::read(input, cachePathMesh);
-		SlipMesh cacheMesh{ cachePathMesh };
+		SlipMesh* cacheMesh = new SlipMesh{ cachePathMesh };
+		cacheMesh->init();
+		cacheMesh->initColl();
 
 		models.push_back(cacheMesh);
 	}
 
+	size_t spawnCount;
+	IO::read(input, spawnCount);
+
+	for (int i = 0; i < spawnCount; i++)
+	{
+		SlipSpawn* spa = new SlipSpawn(0, glm::vec3(), glm::vec3());
+		spa->model = &debugModels[0];
+
+		float juas[3];
+		IO::read(input, juas);
+		spa->position = glm::make_vec3(juas);
+
+		IO::read(input, juas);
+		spa->rotation = glm::make_vec3(juas);
+
+		IO::read(input, spa->team);
+
+		spawns.push_back(spa);
+	}
+
+	size_t entitieCount;
+	IO::read(input, entitieCount);
+
+	for (int i = 0; i < entitieCount; i++)
+	{
+		glm::vec3 pos, rot, sca;
+
+		float juas[3];
+		IO::read(input, juas);
+		pos = glm::vec3(juas[0], juas[1], juas[2]);
+
+		IO::read(input, juas);
+		rot = glm::vec3(juas[0], juas[1], juas[2]);
+
+		IO::read(input, juas);
+		sca = glm::vec3(juas[0], juas[1], juas[2]);
+
+		int model;
+		IO::read(input, model);
+
+		SlipActor* act = new SlipActor();
+		strcpy(act->modelPath, models[model]->path.c_str());
+
+		act->position = pos;
+		act->rotation = rot;
+		act->scale = sca;
+		act->model = models[model];
+
+		entities.push_back(act);
+	}
+
+	//IO::read(input, terrain->heightfieldIMG);
+	//IO::read(input, terrain->collisionPath);
+
+	//terrain->apply();
+
 	input.close();
+
+#ifdef SLIP_EDITOR
+	SlipEditor::Get().print("Loaded level: " + path);
+#endif
+
+	canDraw = true;
+
+	return 1;
+}
+
+void SlipLevel::apply()
+{
+	canDraw = false;
+
+	//entities.push_back(m_Camera);
+
+	this->path = path;
+
+	if (std::strlen(bspPath) != 0)
+	{
+		bsp = new SlipBsp(bspPath);
+	}
+
+	terrain->apply();
 
 	canDraw = true;
 }
 
+void SlipLevel::scripts()
+{
+	if (bsp != nullptr)
+	{
+		if (!bsp->initialized)
+		{
+			bsp->initCol();
+			SlipPhysics::Get().getWorld().addRigidBody(bsp->coll.rigidBody);
+
+			for (int n = 0; n < models.size(); n++)
+			{
+				std::string tempResult = std::string(bsp->skyboxPath);
+				if (models[n]->path == tempResult)
+					bsp->init(*models[n]);
+			}
+		}
+	}
+
+	for (int e = 0; e < entities.size(); e++)
+	{
+		entities[e]->ejecStart();
+		entities[e]->Update();
+	}
+
+#ifdef SLIP_EDITOR
+	if (SlipEditor::Get().isPlayMode()) {
+#endif
+		SlipPhysics::Get().update();
+#ifdef SLIP_EDITOR
+	}
+#endif
+}
+
 void SlipLevel::draw()
 {
-	if (canDraw && mBsp != nullptr)
+	if (canDraw)
 	{
-		if (!playing)
+		if (bsp != nullptr)
 		{
-			if (!mBsp->initialized)
+			bsp->draw();
+
+			SlipPhysics::Get().getWorld().debugDrawObject(bsp->coll.rigidBody->getWorldTransform(), bsp->coll.collisionShape, btVector3(0.f, 1.f, 0.f));
+		}
+
+		if (terrain->isInitialized())
+		{
+			terrain->draw();
+
+			//SlipPhysics::Get().getWorld().debugDrawObject(terrain->collision->rigidBody->getWorldTransform(), terrain->collision->collisionShape, btVector3(0.f, 1.f, 0.f));
+			//SlipPhysics::Get().getWorld().debugDrawObject(terrain->rigidBody->getWorldTransform(), terrain->heightfield, btVector3(0.f, 1.f, 0.f));
+		}
+
+		for (int e = 0; e < entities.size(); e++)
+		{
+			if (SlipActor* p = dynamic_cast<SlipActor*>(entities[e]))
 			{
-				// Build the broadphase
-				broadphase = new btDbvtBroadphase();
+				p->draw();
 
-				// Set up the collision configuration and dispatcher
-				collisionConfiguration = new btDefaultCollisionConfiguration();
-				dispatcher = new btCollisionDispatcher(collisionConfiguration);
-
-				// The actual physics solver
-				solver = new btSequentialImpulseConstraintSolver;
-
-				// The world.
-				dynamicsWorld = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfiguration);
-				dynamicsWorld->setGravity(btVector3(0, 0, 0));
-
-				debugCol = new DebugCollision();
-				debugCol->setDebugMode(debugCol->DBG_DrawWireframe);
-
-				dynamicsWorld->setDebugDrawer(debugCol);
-
-				mBsp->initCol();
-				dynamicsWorld->addRigidBody(mBsp->coll.rigidBody);
-
-				for (int n = 0; n < models.size(); n++)
+				if (p->model->collision != nullptr)
 				{
-					std::string tempResult = std::string(mBsp->skyboxPath);
-					if (models[n].path == tempResult + ".model_cache")
-						mBsp->init(models[n]);
+					btTransform tempTrans{ btQuaternion(p->rotation.x, p->rotation.y, p->rotation.z), btVector3(p->position.x, p->position.y, p->position.z) };
+					SlipPhysics::Get().getWorld().debugDrawObject(p->model->collision->rigidBody->getWorldTransform(), p->model->collision->collisionShape, btVector3(1.f, 0.f, 0.f));
 				}
 			}
+		}
 
-			mBsp->draw();
-
-			dynamicsWorld->debugDrawObject(mBsp->coll.rigidBody->getWorldTransform(), mBsp->coll.collisionShape, btVector3(0.f, 1.f, 0.f));
-
-			for (int e = 0; e < entities.size(); e++)
+		for (int e = 0; e < spawns.size(); e++)
+		{
+			if (SlipSpawn* p = dynamic_cast<SlipSpawn*>(spawns[e]))
 			{
-				entities[e]->ejecStart();
-				entities[e]->Update();
-
-				if (SlipActor* p = dynamic_cast<SlipActor*>(entities[e]))
-				{
-					p->draw();
-
-					if (p->model->collision != nullptr)
-					{
-						btTransform tempTrans{ btQuaternion(p->rotation.x, p->rotation.y, p->rotation.z), btVector3(p->position.x, p->position.y, p->position.z) };
-						dynamicsWorld->debugDrawObject(tempTrans, p->model->collision->collisionModel, btVector3(1.f, 0.f, 0.f));
-					}
-				}
+				p->model = &debugModels[0];
+				p->draw();
 			}
+		}
 
-			dynamicsWorld->stepSimulation(SlipGlobals::Get().GetDeltaTime());
+		SlipDebug::Get().draw();
+		SlipPhysics::Get().debugDraw();
 
-			dynamicsWorld->debugDrawWorld();
-
-			debugCol->render(*m_Camera);
+		/*if (!playing)
+		{
+			
 		}
 		else
-		{
-			if (!mBsp->initialized)
+		{*/
+			/*if (!mBsp->initialized)
 			{
 				// Build the broadphase
 				broadphase = new btDbvtBroadphase();
@@ -207,34 +387,39 @@ void SlipLevel::draw()
 				}
 			}
 
-			dynamicsWorld->stepSimulation(SlipGlobals::Get().GetDeltaTime());
-		}
+			dynamicsWorld->stepSimulation(SlipGlobals::Get().GetDeltaTime());*/
+		//}
 	}
 }
 
 void SlipLevel::clean()
 {
-	if (mBsp != nullptr)
+	for (int e = 0; e < entities.size(); e++)
 	{
-		mBsp->clean();
-
-		for (int e = 0; e < entities.size(); e++)
+		if (SlipBsp* b = dynamic_cast<SlipBsp*>(entities[e]))
 		{
-			if (SlipActor* p = dynamic_cast<SlipActor*>(entities[e]))
-			{
-				p->model->clean();
-			}
+			b->clean();
 		}
 
-		debugCol->clean();
+		if (SlipActor* p = dynamic_cast<SlipActor*>(entities[e]))
+		{
+			p->model->clean();
+		}
 	}
+
+	if (terrain != nullptr)
+	{
+		terrain->clean();
+	}
+
+	//SlipDebug::Get().clean();
 }
 
 int SlipLevel::searchModel(std::string path)
 {
 	for (int i = 0; i < models.size(); i++)
 	{
-		std::filesystem::path root(models[i].path);
+		std::filesystem::path root(models[i]->path);
 		std::string loc = root.parent_path().string() + "/" + root.stem().string();
 
 		if (path == loc)
@@ -243,19 +428,14 @@ int SlipLevel::searchModel(std::string path)
 	return 9999;
 }
 
-SlipLevel::SlipLevel(std::string levelName)
+SlipLevel::SlipLevel()
 {
 	assert(!m_Instance && "Level has initialized...");
 	m_Instance = this;
-	this->levelName = levelName;
 
-	// camera
-	m_Camera = new SlipCamera(glm::vec3(-6.f, 10.f, 15.f));
+	terrain = new SlipTerrain();
+
+	SlipMesh spawnModel{ "models/debug/spawn/spawn" };
+	spawnModel.init();
+	debugModels.push_back(spawnModel);
 }
-
-void SlipLevel::playMode()
-{
-	playing = !playing;
-	openLevel(levelName);
-}
-
