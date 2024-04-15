@@ -3,11 +3,13 @@
 #ifndef SLIP_INPUT_H
 #define SLIP_INPUT_H
 
+#include "SlipEngine.h"
+
 #include "SlipWindow.h"
 
 #include <glm/glm.hpp>
 
-class SlipInput
+class SLIPENGINE_API SlipInput
 {
 private:
 	glm::vec2* mousePos;

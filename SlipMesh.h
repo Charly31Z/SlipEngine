@@ -3,6 +3,8 @@
 #ifndef SLIP_MESH_H
 #define SLIP_MESH_H
 
+#include "SlipEngine.h"
+
 #include <glm/glm.hpp>
 
 #include <vector>
@@ -27,7 +29,7 @@ struct Vertex {
     int materialIndex;
 };
 
-class SlipMesh
+class SLIPENGINE_API SlipMesh
 {
 public:
     struct Material

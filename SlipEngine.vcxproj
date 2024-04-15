@@ -121,8 +121,8 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>A:\VisualStudioProjects\Dependencies\assimp\lib\Debug;A:\VisualStudioProjects\Dependencies\glfw\lib-vc2022;A:\VisualStudioProjects\Dependencies\bulletphysics\lib\Debug</AdditionalLibraryDirectories>
-      <AdditionalDependencies>glfw3_mt.lib;assimp-vc143-mtd.lib;opengl32.lib;shlwapi.lib;BulletCollision_Debug.lib;BulletDynamics_Debug.lib;LinearMath_Debug.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>A:\VisualStudioProjects\Dependencies\assimp\lib\Debug;A:\VisualStudioProjects\Dependencies\glfw\lib-vc2022;A:\VisualStudioProjects\Dependencies\bulletphysics\lib\Debug;A:\VisualStudioProjects\Dependencies\freetype\libs\vs2015-2022\win64</AdditionalLibraryDirectories>
+      <AdditionalDependencies>freetype.lib;glfw3_mt.lib;assimp-vc143-mtd.lib;opengl32.lib;shlwapi.lib;BulletCollision_Debug.lib;BulletDynamics_Debug.lib;LinearMath_Debug.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -154,6 +154,7 @@
     <ClCompile Include="SlipBiped.cpp" />
     <ClCompile Include="SlipBsp.cpp" />
     <ClCompile Include="SlipCamera.cpp" />
+    <ClCompile Include="SlipCollision.cpp" />
     <ClCompile Include="SlipComponent.cpp" />
     <ClCompile Include="SlipDebug.cpp" />
     <ClCompile Include="SlipEngine.cpp" />
@@ -169,6 +170,7 @@
     <ClCompile Include="SlipRender.cpp" />
     <ClCompile Include="SlipShader.cpp" />
     <ClCompile Include="SlipShadows.cpp" />
+    <ClCompile Include="SlipSpawn.cpp" />
     <ClCompile Include="SlipTerrain.cpp" />
     <ClCompile Include="SlipTexture.cpp" />
     <ClCompile Include="SlipUI.cpp" />
@@ -177,10 +179,12 @@
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="resource.h" />
     <ClInclude Include="SlipActor.h" />
     <ClInclude Include="SlipBiped.h" />
     <ClInclude Include="SlipBsp.h" />
     <ClInclude Include="SlipCamera.h" />
+    <ClInclude Include="SlipCollision.h" />
     <ClInclude Include="SlipComponent.h" />
     <ClInclude Include="SlipDebug.h" />
     <ClInclude Include="SlipEngine.h" />
@@ -197,6 +201,7 @@
     <ClInclude Include="SlipRender.h" />
     <ClInclude Include="SlipShader.h" />
     <ClInclude Include="SlipShadows.h" />
+    <ClInclude Include="SlipSpawn.h" />
     <ClInclude Include="SlipTerrain.h" />
     <ClInclude Include="SlipTexture.h" />
     <ClInclude Include="SlipUI.h" />
@@ -219,6 +224,9 @@
     <None Include="assets\shaders\sky.vert" />
     <None Include="assets\shaders\ui.frag" />
     <None Include="assets\shaders\ui.vert" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Resource.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

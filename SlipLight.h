@@ -3,11 +3,13 @@
 #ifndef SLIP_LIGHT_H
 #define SLIP_LIGHT_H
 
+#include "SlipEngine.h"
+
 #include <glm/glm.hpp>
 
 #include "SlipMesh.h"
 
-class SlipLight
+class SLIPENGINE_API SlipLight
 {
 public:
 	enum LIGHT

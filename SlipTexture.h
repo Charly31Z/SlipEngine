@@ -3,6 +3,8 @@
 #ifndef SLIP_TEXTURE_H
 #define SLIP_TEXTURE_H
 
+#include "SlipEngine.h"
+
 #include <string>
 
 struct ImageData
@@ -11,7 +13,7 @@ struct ImageData
 	size_t size = 0;
 };
 
-class SlipTexture
+class SLIPENGINE_API SlipTexture
 {
 private:
 	unsigned int ID;

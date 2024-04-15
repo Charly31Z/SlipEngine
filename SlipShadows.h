@@ -3,9 +3,11 @@
 #ifndef SLIP_SHADOWS_H
 #define SLIP_SHADOWS_H
 
+#include "SlipEngine.h"
+
 #include "SlipShader.h"
 
-class SlipShadows
+class SLIPENGINE_API SlipShadows
 {
 private:
 	unsigned int depthFbo;

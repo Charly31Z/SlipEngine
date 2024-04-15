@@ -3,6 +3,8 @@
 #ifndef SLIP_DEBUG_H
 #define SLIP_DEBUG_H
 
+#include "SlipEngine.h"
+
 #include "SlipCollision.h"
 
 #include <vector>
@@ -53,7 +55,7 @@ public:
 	virtual int     getDebugMode() const { return m_debugMode; }
 };
 
-class SlipDebug
+class SLIPENGINE_API SlipDebug
 {
 private:
 	unsigned int VAO, VBO;

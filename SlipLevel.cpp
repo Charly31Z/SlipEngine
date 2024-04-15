@@ -8,13 +8,13 @@
 #include "SlipGlobals.h"
 #include "SlipActor.h"
 
-#include "FileDialog.h"
 
 #include "SlipID.h"
-#include <SlipDebug.h>
+#include "SlipDebug.h"
 
 #ifdef SLIP_EDITOR
 #include "SlipEditor.h"
+#include "FileDialog.h"
 #endif
 
 void SlipLevel::newLevel(std::string path)
@@ -40,7 +40,11 @@ void SlipLevel::newLevel(std::string path)
 
 void SlipLevel::saveLevel()
 {
+#ifdef SLIP_EDITOR
 	std::string savingPathFolder = IO::FileDialog::SaveFile("Level Cache (*.level_cache)\0 *.level_cache;");
+#else
+	std::string savingPathFolder = "NULL";
+#endif
 
 	std::ofstream out(savingPathFolder, std::ios::binary);
 

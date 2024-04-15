@@ -3,10 +3,12 @@
 #ifndef SLIP_ID_H
 #define SLIP_ID_H
 
+#include "SlipEngine.h"
+
 #include <cstdint>
 #include <assert.h>
 
-class SlipID
+class SLIPENGINE_API SlipID
 {
 private:
 	uint32_t m_Id;

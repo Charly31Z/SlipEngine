@@ -3,6 +3,8 @@
 #ifndef SLIP_CAMERA_H
 #define SLIP_CAMERA_H
 
+#include "SlipEngine.h"
+
 #include "SlipEntity.h"
 
 // Defines several possible options for camera movement. Used as abstraction to stay away from window-system specific input methods
@@ -24,7 +26,7 @@ const float SPEED = 2.5f;
 const float SENSITIVITY = 0.1f;
 const float ZOOM = 75.0f;
 
-class SlipCamera
+class SLIPENGINE_API SlipCamera
 {
 public:
     void Update();

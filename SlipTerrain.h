@@ -1,12 +1,14 @@
 #pragma once
 
+#include "SlipEngine.h"
+
 #include <vector>
 
 #include "SlipPhysics.h"
 #include "SlipShader.h"
 #include "SlipMesh.h"
 
-class SlipTerrain
+class SLIPENGINE_API SlipTerrain
 {
 private:
 	const unsigned int NUM_PATCH_PTS = 4;

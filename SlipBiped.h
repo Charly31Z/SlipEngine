@@ -1,8 +1,10 @@
 #pragma once
 
-#include <SlipMesh.h>
+#include "SlipEngine.h"
 
-class SlipBiped
+#include "SlipMesh.h"
+
+class SLIPENGINE_API SlipBiped
 {
 	SlipMesh* model;
 

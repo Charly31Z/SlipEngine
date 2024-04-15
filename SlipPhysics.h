@@ -1,11 +1,13 @@
 #pragma once
 
+#include "SlipEngine.h"
+
 #include <BulletCollision/CollisionShapes/btHeightfieldTerrainShape.h>
 #include <btBulletDynamicsCommon.h>
 
 #include <glm/glm.hpp>
 
-class SlipPhysics
+class SLIPENGINE_API SlipPhysics
 {
 private:
 	btBroadphaseInterface* broadphase;

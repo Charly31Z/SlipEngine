@@ -3,6 +3,8 @@
 #ifndef SLIP_COLLISION_H
 #define SLIP_COLLISION_H
 
+#include "SlipEngine.h"
+
 #include "SlipShader.h"
 #include <vector>
 
@@ -10,7 +12,7 @@
 
 #include "SlipPhysics.h"
 
-class SlipCollision
+class SLIPENGINE_API SlipCollision
 {
 private:
     struct Vertex {

@@ -3,13 +3,15 @@
 #ifndef SLIP_ENTITY_H
 #define SLIP_ENTITY_H
 
+#include "SlipEngine.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 
-class SlipEntity
+class SLIPENGINE_API SlipEntity
 {
 protected:
 	glm::vec3 oldPos = glm::vec3(1.0f);

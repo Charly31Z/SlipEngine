@@ -1,10 +1,12 @@
 #pragma once
 
+#include "SlipEngine.h"
+
 #include "SlipEntity.h"
 
 class SlipMesh;
 
-class SlipSpawn : public SlipEntity
+class SLIPENGINE_API SlipSpawn : public SlipEntity
 {
 	glm::mat4 getMatrix();
 

@@ -3,13 +3,15 @@
 #ifndef SLIP_WINDOW_H
 #define SLIP_WINDOW_H
 
+#include "SlipEngine.h"
+
 #include <glad/glad.h>
 
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 
-class SlipWindow
+class SLIPENGINE_API SlipWindow
 {
 private:
 	const char* title;

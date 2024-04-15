@@ -5,9 +5,11 @@
 
 #include <vector>
 
+#include "SlipEngine.h"
+
 #include "SlipShader.h"
 
-class SlipFrameBuffer
+class SLIPENGINE_API SlipFrameBuffer
 {
 private:
 	struct Vertex

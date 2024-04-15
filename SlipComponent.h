@@ -3,11 +3,13 @@
 #ifndef SLIP_COMPONENT_H
 #define SLIP_COMPONENT_H
 
+#include "SlipEngine.h"
+
 #include "SlipMesh.h"
 
 #include <string>
 
-class SlipComponent
+class SLIPENGINE_API SlipComponent
 {
 	char name[129];
 };

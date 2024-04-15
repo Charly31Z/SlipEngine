@@ -3,6 +3,8 @@
 #ifndef SLIP_UI_H
 #define SLIP_UI_H
 
+#include "SlipEngine.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -21,7 +23,7 @@
 #include FT_FREETYPE_H
 #endif // !SLIP_INSPECTOR
 
-class SlipUIInterface
+class SLIPENGINE_API SlipUIInterface
 {
 public:
 	glm::vec2 position;
@@ -33,7 +35,7 @@ public:
 	virtual void draw() {}
 };
 
-class SlipUIText : public SlipUIInterface
+class SLIPENGINE_API SlipUIText : public SlipUIInterface
 {
 private:
 	glm::mat4 getModelMatrix();
@@ -66,7 +68,7 @@ public:
 	void draw();
 };
 
-class SlipUIImage : public SlipUIInterface
+class SLIPENGINE_API SlipUIImage : public SlipUIInterface
 {
 private:
 	glm::mat4 getModelMatrix();
@@ -97,7 +99,7 @@ public:
 	void draw();
 };
 
-class SlipUI
+class SLIPENGINE_API SlipUI
 {
 private:
 	std::map<std::string, SlipUIInterface*> elements;

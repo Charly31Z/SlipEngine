@@ -3,9 +3,11 @@
 #ifndef SLIP_GLOBALS_H
 #define SLIP_GLOBALS_H
 
+#include "SlipEngine.h"
+
 #include "SlipCamera.h"
 
-class SlipGlobals
+class SLIPENGINE_API SlipGlobals
 {
 private:
 	float currentFrame, deltaTime, lastFrame;

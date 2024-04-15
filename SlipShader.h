@@ -3,6 +3,8 @@
 #ifndef SLIP_SHADER_H
 #define SLIP_SHADER_H
 
+#include "SlipEngine.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -10,7 +12,7 @@
 #include <stdint.h>
 #include <string>
 
-class SlipShader
+class SLIPENGINE_API SlipShader
 {
 public:
 	unsigned int ID;

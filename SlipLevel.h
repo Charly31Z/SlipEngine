@@ -3,6 +3,8 @@
 #ifndef SLIP_LEVEL_H
 #define SLIP_LEVEL_H
 
+#include "SlipEngine.h"
+
 #include <vector>
 #include <string>
 
@@ -13,7 +15,7 @@
 
 #include "SlipSpawn.h"
 
-class SlipLevel
+class SLIPENGINE_API SlipLevel
 {
 private:
 	inline static SlipCamera* m_Camera;

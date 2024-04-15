@@ -9,12 +9,14 @@
 #include <string>
 #include <windows.h>
 
+#include "SlipEngine.h"
+
 #include "SlipMesh.h"
 #include "SlipTexture.h"
 
 #include "SlipCollision.h"
 
-class SlipBsp
+class SLIPENGINE_API SlipBsp
 {
 private:
 	SlipShader* shader;

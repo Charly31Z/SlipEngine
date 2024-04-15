@@ -6,11 +6,13 @@
 #include <glm/glm.hpp>
 #include <vector>
 
+#include "SlipEngine.h"
+
 #include "SlipShader.h"
 #include "SlipCamera.h"
 #include "SlipTexture.h"
 
-class SlipMaterial
+class SLIPENGINE_API SlipMaterial
 {
 private:
 
