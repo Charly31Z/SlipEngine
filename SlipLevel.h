@@ -47,9 +47,9 @@ public:
 
 	SlipLevel();
 
-	void newLevel(std::string path);
+	/*void newLevel(std::string path);
 	void saveLevel();
-	int openLevel(std::string path);
+	int openLevel(std::string path);*/
 
 	void apply();
 

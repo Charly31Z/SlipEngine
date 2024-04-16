@@ -168,7 +168,7 @@ std::string SlipModelExtract::writeMatToCache(std::string& filepath, const char*
 
 void SlipModelExtract::save(SlipMesh& ms, std::string filepath)
 {
-    std::ofstream outCache(filepath, std::ios::binary);
+    std::ofstream outCache("cache/" + filepath + ".model_cache", std::ios::binary);
 
     if (!outCache.is_open())
         std::cout << "ERROR CREATING CACHE MODEL: " << filepath << ".model_cache" << std::endl;

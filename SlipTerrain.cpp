@@ -189,6 +189,8 @@ void SlipTerrain::draw()
 
 void SlipTerrain::clean()
 {
+    initialized = false;
+
     glDeleteVertexArrays(1, &terrainVAO);
     glDeleteBuffers(1, &terrainVBO);
     glDeleteTextures(1, &texture);

@@ -14,6 +14,8 @@
 
 #include "SlipTexture.h"
 
+#include "SlipID.h"
+
 bool EntitiesGetter(void* data, int index, const char** out_text)
 {
     SlipEntity* ents = (SlipEntity*)data;
@@ -59,17 +61,17 @@ void SlipEditor::startRender()
         {
             if (ImGui::MenuItem("New"))
             {
-                prop = SlipEditor::LEVEL; SlipLevel::Get().newLevel("unamed");
+                prop = SlipEditor::LEVEL;
+                newLevel();
             }
             if (ImGui::MenuItem("Open"))
             {
                 prop = SlipEditor::LEVEL;
-
-                SlipLevel::Get().openLevel(IO::FileDialog::OpenFile("Slip Level (*.level_cache)\0*.level_cache\0"));
+                openLevel();
             }
             if (ImGui::MenuItem("Save"))
             {
-                SlipLevel::Get().saveLevel();
+                saveLevel();
             }
             if (ImGui::MenuItem("Exit"))
             {
@@ -137,7 +139,7 @@ void SlipEditor::startRender()
         playMode = !playMode;
         if (playMode)
         {
-            SlipPhysics::Get().setGravity(glm::vec3(0.f, 9.21f, 0.f));
+            SlipPhysics::Get().setGravity(glm::vec3(0.f, -9.81f, 0.f));
         }
         else {
             SlipPhysics::Get().setGravity(glm::vec3(0.f, 0.f, 0.f));
@@ -869,6 +871,224 @@ void SlipEditor::endRender()
 {
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void SlipEditor::newLevel()
+{
+    SlipLevel::Get().canDraw = false;
+
+    SlipLevel::Get().path = "untilted";
+
+    SlipLevel::Get().entities.clear();
+    SlipLevel::Get().spawns.clear();
+
+    std::fill(std::begin(SlipLevel::Get().bspPath), std::end(SlipLevel::Get().bspPath), '\0');
+
+    SlipLevel::Get().models.clear();
+
+    SlipLevel::Get().clean();
+
+    SlipPhysics::Get().clean();
+    SlipID::Get().reset();
+
+    print("Loaded level: " + SlipLevel::Get().path);
+
+    SlipLevel::Get().canDraw = true;
+}
+
+int SlipEditor::openLevel()
+{
+
+    SlipLevel::Get().path = IO::FileDialog::OpenFile("Level Cache (*.level_cache)\0 *.level_cache;");
+
+    if (SlipLevel::Get().path.empty())
+        return 0;
+
+    SlipLevel::Get().canDraw = false;
+    SlipLevel::Get().models.clear();
+    SlipLevel::Get().entities.clear();
+    SlipLevel::Get().spawns.clear();
+
+    SlipPhysics::Get().clean();
+    SlipID::Get().reset();
+
+    //entities.push_back(m_Camera);
+
+    std::ifstream input(SlipLevel::Get().path, std::ios::binary);
+
+    IO::read(input, SlipLevel::Get().bspPath);
+
+    if (std::strlen(SlipLevel::Get().bspPath) != 0)
+    {
+        SlipLevel::Get().bsp = new SlipBsp(SlipLevel::Get().bspPath);
+    }
+
+    size_t modelCount;
+
+    IO::read(input, modelCount);
+
+    for (int i = 0; i < modelCount; i++)
+    {
+        char cachePathMesh[192];
+        IO::read(input, cachePathMesh);
+        SlipMesh* cacheMesh = new SlipMesh{ cachePathMesh };
+        cacheMesh->init();
+        cacheMesh->initColl();
+
+        SlipLevel::Get().models.push_back(cacheMesh);
+    }
+
+    size_t spawnCount;
+    IO::read(input, spawnCount);
+
+    for (int i = 0; i < spawnCount; i++)
+    {
+        SlipSpawn* spa = new SlipSpawn(0, glm::vec3(), glm::vec3());
+        spa->model = &SlipLevel::Get().debugModels[0];
+
+        float juas[3];
+        IO::read(input, juas);
+        spa->position = glm::make_vec3(juas);
+
+        IO::read(input, juas);
+        spa->rotation = glm::make_vec3(juas);
+
+        IO::read(input, spa->team);
+
+        SlipLevel::Get().spawns.push_back(spa);
+    }
+
+    size_t entitieCount;
+    IO::read(input, entitieCount);
+
+    for (int i = 0; i < entitieCount; i++)
+    {
+        glm::vec3 pos, rot, sca;
+
+        float juas[3];
+        IO::read(input, juas);
+        pos = glm::vec3(juas[0], juas[1], juas[2]);
+
+        IO::read(input, juas);
+        rot = glm::vec3(juas[0], juas[1], juas[2]);
+
+        IO::read(input, juas);
+        sca = glm::vec3(juas[0], juas[1], juas[2]);
+
+        int model;
+        IO::read(input, model);
+
+        SlipActor* act = new SlipActor();
+        strcpy(act->modelPath, SlipLevel::Get().models[model]->path.c_str());
+
+        act->position = pos;
+        act->rotation = rot;
+        act->scale = sca;
+        act->model = SlipLevel::Get().models[model];
+
+        SlipLevel::Get().entities.push_back(act);
+    }
+
+    IO::read(input, SlipLevel::Get().terrain->heightfieldIMG);
+    IO::read(input, SlipLevel::Get().terrain->collisionPath);
+
+    SlipLevel::Get().terrain->apply();
+
+    input.close();
+
+    print("Loaded level: " + SlipLevel::Get().path);
+
+    SlipLevel::Get().canDraw = true;
+
+    return 1;
+}
+
+void SlipEditor::saveLevel()
+{
+    std::string savingPathFolder = IO::FileDialog::SaveFile("Level Cache (*.level_cache)\0 *.level_cache;");
+
+    std::ofstream out(savingPathFolder, std::ios::binary);
+
+    IO::write(out, SlipLevel::Get().bspPath);
+
+    size_t modelCount = SlipLevel::Get().models.size();
+
+    IO::write(out, modelCount);
+
+    if (!SlipLevel::Get().models.empty())
+    {
+        for (int i = 0; i < modelCount; i++)
+        {
+            char cachePathMesh[192];
+            strncpy(cachePathMesh, SlipLevel::Get().models[i]->path.c_str(), sizeof(cachePathMesh));
+            IO::write(out, cachePathMesh);
+        }
+    }
+
+    size_t spawnCount = SlipLevel::Get().spawns.size();
+
+    IO::write(out, spawnCount);
+
+    if (!SlipLevel::Get().spawns.empty())
+    {
+        for (int i = 0; i < spawnCount; i++)
+        {
+            float juas[3];
+
+            juas[0] = SlipLevel::Get().spawns[i]->position.x;
+            juas[1] = SlipLevel::Get().spawns[i]->position.y;
+            juas[2] = SlipLevel::Get().spawns[i]->position.z;
+            IO::write(out, juas);
+
+            juas[0] = SlipLevel::Get().spawns[i]->rotation.x;
+            juas[1] = SlipLevel::Get().spawns[i]->rotation.y;
+            juas[2] = SlipLevel::Get().spawns[i]->rotation.z;
+            IO::write(out, juas);
+            IO::write(out, SlipLevel::Get().spawns[i]->team);
+        }
+    }
+
+    size_t entitiesCount = SlipLevel::Get().entities.size();
+    IO::write(out, entitiesCount);
+
+    if (!SlipLevel::Get().entities.empty())
+    {
+        for (int i = 0; i < entitiesCount; i++)
+        {
+            float juas[3];
+
+            juas[0] = SlipLevel::Get().entities[i]->position.x;
+            juas[1] = SlipLevel::Get().entities[i]->position.y;
+            juas[2] = SlipLevel::Get().entities[i]->position.z;
+            IO::write(out, juas);
+
+            juas[0] = SlipLevel::Get().entities[i]->rotation.x;
+            juas[1] = SlipLevel::Get().entities[i]->rotation.y;
+            juas[2] = SlipLevel::Get().entities[i]->rotation.z;
+            IO::write(out, juas);
+
+            juas[0] = SlipLevel::Get().entities[i]->scale.x;
+            juas[1] = SlipLevel::Get().entities[i]->scale.y;
+            juas[2] = SlipLevel::Get().entities[i]->scale.z;
+            IO::write(out, juas);
+
+            if (SlipActor* p = dynamic_cast<SlipActor*>(SlipLevel::Get().entities[i]))
+            {
+                for (int n = 0; n < modelCount; n++)
+                {
+                    if (p->modelPath == SlipLevel::Get().models[n]->path)
+                    {
+                        IO::write(out, n);
+                    }
+                }
+            }
+        }
+    }
+
+    IO::write(out, SlipLevel::Get().terrain->heightfieldIMG);
+    IO::write(out, SlipLevel::Get().terrain->collisionPath);
+
+    out.close();
 }
 
 void SlipEditor::print(std::string text)

@@ -17,7 +17,7 @@
 #include "FileDialog.h"
 #endif
 
-void SlipLevel::newLevel(std::string path)
+/*void SlipLevel::newLevel(std::string path)
 {
 	this->path = path;
 
@@ -236,7 +236,7 @@ int SlipLevel::openLevel(std::string path)
 	canDraw = true;
 
 	return 1;
-}
+}*/
 
 void SlipLevel::apply()
 {
@@ -398,22 +398,37 @@ void SlipLevel::draw()
 
 void SlipLevel::clean()
 {
+	if (bsp != nullptr)
+	{
+		bsp->clean();
+
+		delete bsp;
+
+		bsp = nullptr;
+	}
+
 	for (int e = 0; e < entities.size(); e++)
 	{
-		if (SlipBsp* b = dynamic_cast<SlipBsp*>(entities[e]))
+		/*if (SlipBsp* b = dynamic_cast<SlipBsp*>(entities[e]))
 		{
 			b->clean();
-		}
+
+			delete b;
+		}*/
 
 		if (SlipActor* p = dynamic_cast<SlipActor*>(entities[e]))
 		{
 			p->model->clean();
+
+			delete p;
 		}
 	}
 
 	if (terrain != nullptr)
 	{
 		terrain->clean();
+
+		//delete terrain;
 	}
 
 	//SlipDebug::Get().clean();

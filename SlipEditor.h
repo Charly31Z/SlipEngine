@@ -131,6 +131,10 @@ public:
 	void processInput();
 	void endRender();
 
+	void newLevel();
+	int openLevel();
+	void saveLevel();
+
 	void print(std::string text);
 
 	SlipCamera& getViewportCamera() { return *camera; }

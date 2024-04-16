@@ -44,6 +44,8 @@ SlipBsp::SlipBsp(std::string path) : path(path)
     if (!input.is_open())
         std::cout << "ERROR READING BSP: " << path.c_str() << ".bsp_cache" << std::endl;
 
+    std::cout << "Reading BSP..." << std::endl;
+
 	unsigned int vertexCount;
     unsigned int indicesCount;
 
@@ -53,7 +55,6 @@ SlipBsp::SlipBsp(std::string path) : path(path)
     for (int i = 0; i < vertexCount; i++)
     {
         std::streamoff pos = input.tellg();
-        std::cout << pos << std::endl;
 
         Vertex vertex;
 
@@ -65,19 +66,19 @@ SlipBsp::SlipBsp(std::string path) : path(path)
         memcpy(&vx, &b, sizeof(vx));
 
         pos = input.tellg();
-        std::cout << pos << std::endl;
+        //std::cout << pos << std::endl;
 
         IO::read(input, b);
         memcpy(&vy, &b, sizeof(vy));
 
         pos = input.tellg();
-        std::cout << pos << std::endl;
+        //std::cout << pos << std::endl;
 
         IO::read(input, b);
         memcpy(&vz, &b, sizeof(vz));
 
         pos = input.tellg();
-        std::cout << pos << std::endl;
+        //std::cout << pos << std::endl;
 
         vertex.Position = glm::vec3(vx, vy, vz);
 
@@ -106,7 +107,7 @@ SlipBsp::SlipBsp(std::string path) : path(path)
     for (int j = 0; j < indicesCount; j++)
     {
         std::streamoff pos = input.tellg();
-        std::cout << pos << std::endl;
+        //std::cout << pos << std::endl;
 
         unsigned int index;
 
@@ -120,7 +121,7 @@ SlipBsp::SlipBsp(std::string path) : path(path)
     for (int h = 0; h < vertexCount; h++)
     {
         std::streamoff pos = input.tellg();
-        std::cout << pos << std::endl;
+        //std::cout << pos << std::endl;
 
         Vertex vertex;
 
@@ -137,7 +138,7 @@ SlipBsp::SlipBsp(std::string path) : path(path)
     for (int z = 0; z < indicesCount; z++)
     {
         std::streamoff pos = input.tellg();
-        std::cout << pos << std::endl;
+        //std::cout << pos << std::endl;
 
         unsigned int index;
 
@@ -150,7 +151,7 @@ SlipBsp::SlipBsp(std::string path) : path(path)
     for (int k = 0; k < 3; k++)
     {
         std::streamoff pos = input.tellg();
-        std::cout << pos << std::endl;
+        //std::cout << pos << std::endl;
 
         SlipTexture texture;
 
