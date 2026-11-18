@@ -1,0 +1,92 @@
+--- a/include/SlipEngine/core/SlipGlobals.h
++++ b/include/SlipEngine/core/SlipGlobals.h
+@@ -21,8 +21,11 @@ class SLIPENGINE_API SlipGlobals
+ public:
+ 	static SlipGlobals& Get();
+ 
+-	float GetDeltaTime() { return (deltaTime > 0.0f && deltaTime < 0.2f) ? deltaTime : (1.0f / 60.0f); }
++	float GetDeltaTime() const { return (deltaTime > 0.0f && deltaTime < 0.2f) ? deltaTime : (1.0f / 60.0f); }
+ 	void SetDeltaTime(float dt) { this->deltaTime = dt; }
++
++	float GetTime() const { return currentFrame; }
++	void SetTime(float time) { this->currentFrame = time; }
+ 
+ 	float GetFixedDeltaTime() const { return fixedDeltaTime; }
+ 	void SetFixedDeltaTime(float fdt) { fixedDeltaTime = fdt; }
+--- a/src/editor/panels/ViewportPanel.cpp
++++ b/src/editor/panels/ViewportPanel.cpp
+@@ -1372,7 +1372,9 @@ void ViewportPanel::OnRenderViewport(float deltaTime)
+             cmd.wireframe = (terrainComp ? terrainComp->wireframe : (prim && prim->wireframe));
+ 
+             float dist = glm::distance(eye, glm::vec3(item.worldTransform[3]));
+-            uint32_t shaderId = (subMat && std::string(subMat->shaderType) == "Unlit") ? 1 : 2;
++            uint32_t shaderId = (subMat && subMat->shader) 
++                ? static_cast<uint32_t>(subMat->shader->ID) 
++                : ((subMat && std::string(subMat->shaderType) == "Unlit") ? 1 : 2);
+             uint32_t matId = subMat ? static_cast<uint32_t>(reinterpret_cast<uintptr_t>(subMat) & 0xFFFF) : 0;
+             uint32_t vaoId = (item.mesh && item.submeshIndex < item.mesh->meshes.size()) ?
+                              (item.mesh->meshes[item.submeshIndex].VAO & 0xFF) : 0;
+@@ -1414,6 +1416,8 @@ void ViewportPanel::OnRenderViewport(float deltaTime)
+         m_RenderQueue.Flush([&](SlipShader* shader) {
++            shader->setFloat("u_Time", SlipGlobals::Get().GetTime());
++            shader->setFloat("u_DeltaTime", SlipGlobals::Get().GetDeltaTime());
+             shader->setMat4("u_Projection", projection);
+             shader->setMat4("u_View", view);
+             shader->setMat4("projection", projection);
+--- a/src/render/SlipRenderQueue.cpp
++++ b/src/render/SlipRenderQueue.cpp
+@@ -8,6 +8,7 @@
+ #include "SlipPrimitive.h"
+ #include "SlipGL.h"
++#include "SlipGlobals.h"
+ #include <algorithm>
+ 
+ uint64_t RenderCommand::MakeSortKey(RenderPassType pass, uint32_t shaderId, uint32_t matId, uint32_t vaoId, float depth, bool frontToBack)
+@@ -57,7 +58,11 @@ void SlipRenderQueue::Flush(const std::function<void(SlipShader*)>& onBindShader
+     for (const auto& cmd : m_Commands) {
+         SlipShader* shader = nullptr;
+-        std::string sType = (cmd.material && !std::string(cmd.material->shaderType).empty()) ? cmd.material->shaderType : "Lit";
+-        if (sType == "default") sType = "Lit";
+-        shader = SlipShaderLibrary::Get(sType);
+-        if (!shader) shader = SlipShaderLibrary::Get("Lit");
++        if (cmd.material && cmd.material->shader) {
++            shader = cmd.material->shader;
++        } else {
++            std::string sType = (cmd.material && !std::string(cmd.material->shaderType).empty()) ? cmd.material->shaderType : "Lit";
++            if (sType == "default") sType = "Lit";
++            shader = SlipShaderLibrary::Get(sType);
++            if (!shader) shader = SlipShaderLibrary::Get("Lit");
++        }
+         if (!shader) continue;
+ 
+         if (shader != currentShader) {
+             shader->use();
++            shader->setFloat("u_Time", SlipGlobals::Get().GetTime());
++            shader->setFloat("u_DeltaTime", SlipGlobals::Get().GetDeltaTime());
+             if (onBindShaderGlobals) {
+                 onBindShaderGlobals(shader);
+             }
+--- a/src/SlipEngine.cpp
++++ b/src/SlipEngine.cpp
+@@ -318,6 +318,8 @@ void SlipEngine::Render() {
+     SlipShader* litShader = SlipShaderLibrary::LoadOrGet("Lit");
+     if (litShader) {
+         litShader->use();
++        litShader->setFloat("u_Time", SlipGlobals::Get().GetTime());
++        litShader->setFloat("u_DeltaTime", SlipGlobals::Get().GetDeltaTime());
+         litShader->setMat4("u_Projection", proj);
+         litShader->setMat4("u_View", view);
+         litShader->setVec3("u_CameraPos", eye);
+--- a/src/render/SlipMaterial.cpp
++++ b/src/render/SlipMaterial.cpp
+@@ -390,6 +390,10 @@ void SlipMaterial::bind(glm::mat4 &model)
+ 
+     shader->use();
+ 
++    // Globals
++    shader->setFloat("u_Time", SlipGlobals::Get().GetTime());
++    shader->setFloat("u_DeltaTime", SlipGlobals::Get().GetDeltaTime());
++
+     // Matrices
+     shader->setMat4("u_Model", model);
+     shader->setMat4("model", model);

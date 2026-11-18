@@ -1,0 +1,304 @@
+# SlipEngine Scene File
+Version: 2
+EntitiesCount: 14
+
+Entity:
+  Id: 1
+  Name: Cielo y Atmosfera
+  Static: false
+  Position: 0 0 0
+  Rotation: 0 0 0
+  Scale: 1 1 1
+  SlipSkyComponent:
+    SunDirection: 0.25 0.55 0.75
+    SunColor: 1.0 0.82 0.65
+    CloudAmbientColor: 0.35 0.38 0.48
+    CloudCoverage: 0.45
+    CloudDensity: 0.002
+    WindSpeed: 2.5
+    WindDirection: 1.0 0.2
+    CloudBaseHeight: 650.0
+    CloudLayerThickness: 500.0
+    CloudScale: 0.0001
+    Absorption: 0.5
+    HenyeyG: 0.85
+    SilverSpread: 0.9
+    PowderFactor: 1.4
+    TotalSlices: 16
+    DiscardThreshold: 0.05
+    RaymarchSteps: 8
+    DepthSensitivity: 0.18
+    FollowDirectionalLight: 1
+    DynamicAtmosphere: 1
+    DownscaleFactor: 1
+
+Entity:
+  Id: 2
+  Name: Luz Solar
+  Static: false
+  Position: 0 50 0
+  Rotation: 48.0 -35.0 0.0
+  Scale: 1 1 1
+  LightComponent:
+    Type: Directional
+    Color: 1.0 0.95 0.88
+    Intensity: 1.3
+    Range: 500
+    SpotAngle: 30
+    CastShadows: 1
+
+Entity:
+  Id: 3
+  Name: Pista de Pruebas
+  Static: true
+  Position: 0 0 0
+  Rotation: 0 0 0
+  Scale: 30 1 30
+  MeshComponent:
+    ModelPath: primitive:plane
+    MaterialPath: 
+    SubMaterial: 0 
+  BoxColliderComponent:
+    Size: 10 10.0 10
+    CenterOffset: 0 -5.0 0
+    IsTrigger: 0
+  RigidBodyComponent:
+    Mass: 0
+    LinearDrag: 0
+    AngularDrag: 0
+    IsKinematic: 0
+    UseGravity: 0
+    Friction: 0.7
+    RollingFriction: 0
+    Restitution: 0
+    FreezePosition: 1 1 1
+    FreezeRotation: 1 1 1
+
+Entity:
+  Id: 4
+  Name: NFSCar
+  Static: false
+  Position: 0 1.5 0
+  Rotation: 0 0 0
+  Scale: 1.8 0.7 4.2
+  MeshComponent:
+    ModelPath: primitive:cube
+    MaterialPath: 
+    SubMaterial: 0 
+  BoxColliderComponent:
+    Size: 0.9 0.4 0.8
+    CenterOffset: 0 0 0
+    IsTrigger: 0
+  RigidBodyComponent:
+    Mass: 1250
+    LinearDrag: 0.05
+    AngularDrag: 0.35
+    IsKinematic: 0
+    UseGravity: 1
+    Friction: 0.3
+    RollingFriction: 0.01
+    Restitution: 0.0
+    FreezePosition: 0 0 0
+    FreezeRotation: 0 0 0
+  VehicleComponent:
+    SuspensionStiffness: 35.0
+    SuspensionDamping: 4.5
+    SuspensionCompression: 4.0
+    MaxSuspensionTravelCm: 25.0
+    FrictionSlip: 5.2
+    MaxSuspensionForce: 35000.0
+    RollInfluence: 0.10
+    ChassisDimensions: 1.8 0.4 3.8 0.35
+  ScriptComponent:
+    ScriptPath: examples/NFSCarController.lua
+    Enabled: 1
+
+Entity:
+  Id: 11
+  Name: Rueda_FL
+  ParentId: 4
+  Parent: NFSCar
+  InheritScale: 0
+  Static: false
+  Position: 0.9 -0.2 1.8
+  Rotation: 0 0 0
+  Scale: 0.7 0.7 0.7
+  MeshComponent:
+    ModelPath: primitive:sphere
+    MaterialPath: 
+    SubMaterial: 0 
+
+Entity:
+  Id: 12
+  Name: Rueda_FR
+  ParentId: 4
+  Parent: NFSCar
+  InheritScale: 0
+  Static: false
+  Position: -0.9 -0.2 1.8
+  Rotation: 0 0 0
+  Scale: 0.7 0.7 0.7
+  MeshComponent:
+    ModelPath: primitive:sphere
+    MaterialPath: 
+    SubMaterial: 0 
+
+Entity:
+  Id: 13
+  Name: Rueda_RL
+  ParentId: 4
+  Parent: NFSCar
+  InheritScale: 0
+  Static: false
+  Position: 0.9 -0.2 -1.8
+  Rotation: 0 0 0
+  Scale: 0.7 0.7 0.7
+  MeshComponent:
+    ModelPath: primitive:sphere
+    MaterialPath: 
+    SubMaterial: 0 
+
+Entity:
+  Id: 14
+  Name: Rueda_RR
+  ParentId: 4
+  Parent: NFSCar
+  InheritScale: 0
+  Static: false
+  Position: -0.9 -0.2 -1.8
+  Rotation: 0 0 0
+  Scale: 0.7 0.7 0.7
+  MeshComponent:
+    ModelPath: primitive:sphere
+    MaterialPath: 
+    SubMaterial: 0 
+
+Entity:
+  Id: 5
+  Name: MainCamera
+  Static: false
+  Position: 0 2.5 -7.0
+  Rotation: 9 180 0
+  Scale: 1 1 1
+  CameraComponent:
+    Projection: Perspective
+    FOV: 60
+    NearClip: 0.1
+    FarClip: 5000
+    OrthoSize: 5
+    IsPrimary: 1
+    ClearColor: 0.1 0.12 0.16 1
+    Letterbox: 0
+    Pillarbox: 0
+  CinematicCameraComponent:
+    Target: NFSCar
+    Distance: 4.8
+    Height: 0.85
+    Pitch: 6.0
+    PositionLag: 8.5
+    RotationLag: 6.5
+    DriftCompensation: 0.40
+    DynamicFOV: 1
+    BaseFOV: 60
+    BoostFOV: 76
+
+Entity:
+  Id: 6
+  Name: HUD_Canvas
+  Static: false
+  Position: 0 0 0
+  Rotation: 0 0 0
+  Scale: 1 1 1
+  CanvasComponent:
+    RenderMode: ScreenSpaceOverlay
+    ReferenceResolution: 1920 1080
+    ScaleWithScreenSize: 1
+    SortingOrder: 10
+
+Entity:
+  Id: 7
+  Name: SpeedText
+  ParentId: 6
+  Parent: HUD_Canvas
+  Static: false
+  Position: 0 0 0
+  Rotation: 0 0 0
+  Scale: 1 1 1
+  RectTransformComponent:
+    AnchorPreset: BottomRight
+    AnchoredPosition: -160 120
+    Size: 260 55
+    Pivot: 1 0
+  UITextComponent:
+    Text: 0 KM/H
+    FontPath: 
+    FontSize: 42
+    Color: 1 1 1 1
+    AlignH: 2
+    AlignV: 1
+
+Entity:
+  Id: 8
+  Name: GearText
+  ParentId: 6
+  Parent: HUD_Canvas
+  Static: false
+  Position: 0 0 0
+  Rotation: 0 0 0
+  Scale: 1 1 1
+  RectTransformComponent:
+    AnchorPreset: BottomRight
+    AnchoredPosition: -160 185
+    Size: 120 70
+    Pivot: 1 0
+  UITextComponent:
+    Text: 1
+    FontPath: 
+    FontSize: 56
+    Color: 1 0.85 0.15 1
+    AlignH: 2
+    AlignV: 1
+
+Entity:
+  Id: 9
+  Name: RPMText
+  ParentId: 6
+  Parent: HUD_Canvas
+  Static: false
+  Position: 0 0 0
+  Rotation: 0 0 0
+  Scale: 1 1 1
+  RectTransformComponent:
+    AnchorPreset: BottomRight
+    AnchoredPosition: -160 80
+    Size: 240 35
+    Pivot: 1 0
+  UITextComponent:
+    Text: 900 RPM
+    FontPath: 
+    FontSize: 24
+    Color: 0.95 0.95 0.95 0.9
+    AlignH: 2
+    AlignV: 1
+
+Entity:
+  Id: 10
+  Name: NitroBar
+  ParentId: 6
+  Parent: HUD_Canvas
+  Static: false
+  Position: 0 0 0
+  Rotation: 0 0 0
+  Scale: 1 1 1
+  RectTransformComponent:
+    AnchorPreset: BottomRight
+    AnchoredPosition: -160 50
+    Size: 240 18
+    Pivot: 1 0
+  UIProgressBarComponent:
+    MinValue: 0
+    MaxValue: 100
+    Value: 100
+    BackgroundColor: 0.08 0.1 0.14 0.85
+    FillColor: 0.1 0.55 0.95 1
+    ShowPercentageText: 0

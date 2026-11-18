@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "materialType": "Lit",
+  "properties": [{
+      "id": "prop_Roughness",
+      "name": "Roughness",
+      "displayName": "Roughness",
+      "type": "Float",
+      "defaultValue": [0.44999998807907104, 0.0, 0.0, 0.0],
+      "defaultTexturePath": ""
+    }, {
+      "id": "prop_Metallic",
+      "name": "Metallic",
+      "displayName": "Metalico",
+      "type": "Float",
+      "defaultValue": [0.20000000298023224, 0.0, 0.0, 0.0],
+      "defaultTexturePath": ""
+    }],
+  "nodes": [{
+      "id": "node_master",
+      "type": "MasterOutput",
+      "title": "Master (Lit)",
+      "position": [800.0, 300.0],
+      "customProperties": {
+        "materialType": "Lit"
+      },
+      "inputs": [{
+          "id": "Albedo",
+          "name": "Albedo",
+          "type": "Vec3",
+          "defaultValue": [1.0, 1.0, 1.0, 1.0]
+        }, {
+          "id": "Normal",
+          "name": "Normal",
+          "type": "Vec3",
+          "defaultValue": [0.0, 0.0, 1.0, 0.0]
+        }, {
+          "id": "Roughness",
+          "name": "Roughness",
+          "type": "Float",
+          "defaultValue": [0.5, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Metallic",
+          "name": "Metallic",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Emissive",
+          "name": "Emissive",
+          "type": "Vec3",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "AO",
+          "name": "AO",
+          "type": "Float",
+          "defaultValue": [1.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Alpha",
+          "name": "Alpha",
+          "type": "Float",
+          "defaultValue": [1.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "AlphaClipThreshold",
+          "name": "Alpha Clip",
+          "type": "Float",
+          "defaultValue": [0.5, 0.0, 0.0, 0.0]
+        }],
+      "outputs": []
+    }, {
+      "id": "Texture_Sampler_1",
+      "type": "Texture_Sampler",
+      "title": "Sample Texture 2D",
+      "position": [260.0, 180.0],
+      "customProperties": {},
+      "inputs": [{
+          "id": "UV",
+          "name": "UV",
+          "type": "Vec2",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Sampler",
+          "name": "Sampler",
+          "type": "Texture2D",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }],
+      "outputs": [{
+          "id": "RGBA",
+          "name": "RGBA",
+          "type": "Vec4",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "RGB",
+          "name": "RGB",
+          "type": "Vec3",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "R",
+          "name": "R",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "G",
+          "name": "G",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "B",
+          "name": "B",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "A",
+          "name": "A",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Input_Property_1",
+      "type": "Input_Property",
+      "title": "Rugosidad",
+      "position": [260.0, 430.0],
+      "customProperties": {
+        "propertyId": "",
+        "propertyName": "",
+        "propertyType": "Float"
+      },
+      "inputs": [],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Input_Property_2",
+      "type": "Input_Property",
+      "title": "Metalico",
+      "position": [260.0, 540.0],
+      "customProperties": {
+        "propertyId": "prop_Metallic",
+        "propertyName": "Metallic",
+        "propertyType": "Float"
+      },
+      "inputs": [],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }],
+  "links": [{
+      "id": "link_1",
+      "fromNode": "Texture_Sampler_1",
+      "fromPort": "RGB",
+      "toNode": "node_master",
+      "toPort": "Albedo"
+    }, {
+      "id": "link_2",
+      "fromNode": "Input_Property_1",
+      "fromPort": "Out",
+      "toNode": "node_master",
+      "toPort": "Roughness"
+    }, {
+      "id": "link_3",
+      "fromNode": "Input_Property_2",
+      "fromPort": "Out",
+      "toNode": "node_master",
+      "toPort": "Metallic"
+    }]
+}

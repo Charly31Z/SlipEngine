@@ -1,0 +1,67 @@
+# SlipEngine Scene File
+Version: 2
+EntitiesCount: 3
+
+Entity:
+  Id: 1
+  Name: Nueva Entidad
+  Static: false
+  Position: 0 0 0
+  Rotation: 0.236667 0 0
+  Scale: 1 1 1
+  SlipSkyComponent:
+    SunDirection: 1.56856e-05 0.166408 0.986057
+    SunColor: 1 0.673321 0.468661
+    CloudAmbientColor: 0.392699 0.365398 0.501185
+    CloudCoverage: 0.58
+    CloudDensity: 0.0029
+    WindSpeed: -4.4
+    WindDirection: 1 0.2
+    CloudBaseHeight: 636.8
+    CloudLayerThickness: 531
+    CloudScale: 0.0001
+    Absorption: 0.52
+    HenyeyG: 0.9
+    SilverSpread: 0.95
+    PowderFactor: 1.45
+    TotalSlices: 17
+    DiscardThreshold: 0.063
+    RaymarchSteps: 8
+    DepthSensitivity: 0.179
+    FollowDirectionalLight: 1
+    DynamicAtmosphere: 1
+    DownscaleFactor: 1
+    CloudNoisePath: 
+    BlueNoisePath: 
+
+Entity:
+  Id: 2
+  Name: Luz Direccional
+  Static: false
+  Position: 0 0 0
+  Rotation: 53.8553 -0.384688 -0.193352
+  Scale: 1 1 1
+  LightComponent:
+    Type: Directional
+    Color: 1 1 1
+    Intensity: 1
+    Range: 10
+    SpotAngle: 30
+    CastShadows: 1
+
+Entity:
+  Id: 3
+  Name: Plano
+  Static: false
+  Position: 0 0 0
+  Rotation: 0 0 0
+  Scale: 1 1 1
+  MeshComponent:
+    ModelPath: primitive:plane
+    MaterialPath: 
+    SubMaterial: 0 
+  BoxColliderComponent:
+    Size: 10 0.05 10
+    CenterOffset: 0 0 0
+    IsTrigger: 0
+

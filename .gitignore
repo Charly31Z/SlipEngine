@@ -1,0 +1,73 @@
+# ==========================================
+# CMake (Caché, archivos generados y builds)
+# ==========================================
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+.cmake/
+Makefile
+CMakeUserPresets.json
+build/
+build-*/
+out/
+
+# ==========================================
+# vcpkg (Dependencias descargadas/compiladas)
+# ==========================================
+vcpkg_installed/
+
+# ==========================================
+# Visual Studio / MSVC / Binarios C++
+# ==========================================
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.dir/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+x64/
+x86/
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.o
+*.so
+*.a
+*.dylib
+
+# ==========================================
+# Android / Gradle
+# ==========================================
+.gradle/
+.idea/
+local.properties
+android/app/build/
+android/app/.cxx/
+
+# ==========================================
+# Caché y estado en tiempo de ejecución
+# ==========================================
+cache/
+imgui.ini
+*.log
+
+# ==========================================
+# IDEs y Sistema Operativo
+# ==========================================
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

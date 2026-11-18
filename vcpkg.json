@@ -1,0 +1,22 @@
+{
+  "name": "slipengine",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "glm",
+    "sdl2",
+    "glad",
+    {
+      "name": "imgui",
+      "features": [
+        "opengl3-binding",
+        "docking-experimental"
+      ]
+    },
+    "assimp",
+    "bullet3",
+    "freetype",
+    "lua",
+    "sol2",
+    "meshoptimizer"
+  ]
+}

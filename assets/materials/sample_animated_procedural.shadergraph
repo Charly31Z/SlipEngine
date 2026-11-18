@@ -1,0 +1,303 @@
+{
+  "version": 1,
+  "materialType": "Unlit",
+  "properties": [{
+      "id": "prop_TintColor",
+      "name": "TintColor",
+      "displayName": "TintColor",
+      "type": "Vec3",
+      "defaultValue": [0.8500000238418579, 0.44999998807907104, 0.15000000596046448, 1.0],
+      "defaultTexturePath": ""
+    }, {
+      "id": "prop_PulseSpeed",
+      "name": "PulseSpeed",
+      "displayName": "PulseSpeed",
+      "type": "Float",
+      "defaultValue": [2.0, 0.0, 0.0, 0.0],
+      "defaultTexturePath": ""
+    }],
+  "nodes": [{
+      "id": "node_master",
+      "type": "MasterOutput",
+      "title": "Master (Unlit)",
+      "position": [800.0, 300.0],
+      "customProperties": {
+        "materialType": "Unlit"
+      },
+      "inputs": [{
+          "id": "Color",
+          "name": "Color",
+          "type": "Vec3",
+          "defaultValue": [1.0, 1.0, 1.0, 1.0]
+        }, {
+          "id": "Emissive",
+          "name": "Emissive",
+          "type": "Vec3",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Alpha",
+          "name": "Alpha",
+          "type": "Float",
+          "defaultValue": [1.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "AlphaClipThreshold",
+          "name": "Alpha Clip",
+          "type": "Float",
+          "defaultValue": [0.5, 0.0, 0.0, 0.0]
+        }],
+      "outputs": []
+    }, {
+      "id": "Input_Property_1",
+      "type": "Input_Property",
+      "title": "",
+      "position": [220.0, 150.0],
+      "customProperties": {
+        "propertyId": "",
+        "propertyName": "",
+        "propertyType": "Vec3"
+      },
+      "inputs": [],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Vec3",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Time_Time_1",
+      "type": "Time_Time",
+      "title": "Time",
+      "position": [40.0, 380.0],
+      "customProperties": {},
+      "inputs": [],
+      "outputs": [{
+          "id": "Time",
+          "name": "Time",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "SinTime",
+          "name": "Sin Time",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "CosTime",
+          "name": "Cos Time",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "DeltaTime",
+          "name": "Delta Time",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Input_Property_2",
+      "type": "Input_Property",
+      "title": "PulseSpeed",
+      "position": [40.0, 520.0],
+      "customProperties": {
+        "propertyId": "prop_PulseSpeed",
+        "propertyName": "PulseSpeed",
+        "propertyType": "Float"
+      },
+      "inputs": [],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Math_Multiply_1",
+      "type": "Math_Multiply",
+      "title": "Multiply",
+      "position": [220.0, 400.0],
+      "customProperties": {},
+      "inputs": [{
+          "id": "A",
+          "name": "A",
+          "type": "Float",
+          "defaultValue": [1.0, 1.0, 1.0, 1.0]
+        }, {
+          "id": "B",
+          "name": "B",
+          "type": "Float",
+          "defaultValue": [1.0, 1.0, 1.0, 1.0]
+        }],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Math_Sin_1",
+      "type": "Math_Sin",
+      "title": "Sin",
+      "position": [380.0, 400.0],
+      "customProperties": {},
+      "inputs": [{
+          "id": "In",
+          "name": "In",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Procedural_Remap_1",
+      "type": "Procedural_Remap",
+      "title": "Remap",
+      "position": [540.0, 400.0],
+      "customProperties": {},
+      "inputs": [{
+          "id": "In",
+          "name": "In",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "InMin",
+          "name": "In Min",
+          "type": "Float",
+          "defaultValue": [-1.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "InMax",
+          "name": "In Max",
+          "type": "Float",
+          "defaultValue": [1.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "OutMin",
+          "name": "Out Min",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "OutMax",
+          "name": "Out Max",
+          "type": "Float",
+          "defaultValue": [1.0, 0.0, 0.0, 0.0]
+        }],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Input_Vec4_1",
+      "type": "Input_Vec4",
+      "title": "Vector4",
+      "position": [700.0, 560.0],
+      "customProperties": {},
+      "inputs": [],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Vec4",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Vector_Combine_1",
+      "type": "Vector_Combine",
+      "title": "Combine",
+      "position": [700.0, 300.0],
+      "customProperties": {},
+      "inputs": [{
+          "id": "X",
+          "name": "X",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Y",
+          "name": "Y",
+          "type": "Float",
+          "defaultValue": [0.15000000596046448, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Z",
+          "name": "Z",
+          "type": "Float",
+          "defaultValue": [0.44999998807907104, 0.0, 0.0, 0.0]
+        }, {
+          "id": "W",
+          "name": "W",
+          "type": "Float",
+          "defaultValue": [1.0, 1.0, 1.0, 1.0]
+        }],
+      "outputs": [{
+          "id": "Vec4",
+          "name": "Vec4",
+          "type": "Vec4",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Vec3",
+          "name": "Vec3",
+          "type": "Vec3",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }, {
+          "id": "Vec2",
+          "name": "Vec2",
+          "type": "Vec2",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }, {
+      "id": "Input_Float_1",
+      "type": "Input_Float",
+      "title": "Float",
+      "position": [540.0, 300.0],
+      "customProperties": {},
+      "inputs": [],
+      "outputs": [{
+          "id": "Out",
+          "name": "Out",
+          "type": "Float",
+          "defaultValue": [0.0, 0.0, 0.0, 0.0]
+        }]
+    }],
+  "links": [{
+      "id": "link_1",
+      "fromNode": "Time_Time_1",
+      "fromPort": "Time",
+      "toNode": "Math_Multiply_1",
+      "toPort": "A"
+    }, {
+      "id": "link_2",
+      "fromNode": "Input_Property_2",
+      "fromPort": "Out",
+      "toNode": "Math_Multiply_1",
+      "toPort": "B"
+    }, {
+      "id": "link_3",
+      "fromNode": "Math_Multiply_1",
+      "fromPort": "Out",
+      "toNode": "Math_Sin_1",
+      "toPort": "In"
+    }, {
+      "id": "link_4",
+      "fromNode": "Math_Sin_1",
+      "fromPort": "Out",
+      "toNode": "Procedural_Remap_1",
+      "toPort": "In"
+    }, {
+      "id": "link_5",
+      "fromNode": "Procedural_Remap_1",
+      "fromPort": "Out",
+      "toNode": "Vector_Combine_1",
+      "toPort": "X"
+    }, {
+      "id": "link_6",
+      "fromNode": "Vector_Combine_1",
+      "fromPort": "Vec3",
+      "toNode": "node_master",
+      "toPort": "Emissive"
+    }, {
+      "id": "link_7",
+      "fromNode": "Input_Property_1",
+      "fromPort": "Out",
+      "toNode": "node_master",
+      "toPort": "Color"
+    }]
+}

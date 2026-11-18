@@ -1,0 +1,4 @@
+shaderType: ShaderGraph
+shaderGraph: test.shadergraph
+graphFloat_Speed: 5.5
+graphVector_Tint: 1 0 0 1
