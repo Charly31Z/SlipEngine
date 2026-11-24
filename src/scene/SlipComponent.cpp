@@ -1973,7 +1973,9 @@ ReflectionProbeComponent::~ReflectionProbeComponent()
 {
 #if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
     if (cubemap != 0) {
-        glDeleteTextures(1, &cubemap);
+        if (glad_glDeleteTextures) {
+            glDeleteTextures(1, &cubemap);
+        }
         cubemap = 0;
     }
 #endif

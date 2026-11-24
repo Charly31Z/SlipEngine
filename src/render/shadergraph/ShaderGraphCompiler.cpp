@@ -1,5 +1,8 @@
 #include "SlipEngine/render/shadergraph/ShaderGraphCompiler.h"
 #include "SlipEngine/render/shadergraph/ShaderGraphSerializer.h"
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+#include "SlipEngine/render/vulkan/SlipSpirvCompiler.h"
+#endif
 #include <sstream>
 #include <iomanip>
 #include <queue>
@@ -215,6 +218,8 @@ namespace SlipShaderGraph {
     void ShaderGraphCompiler::AppendGLSLVersionHeader(std::ostringstream& ss, GLSLTargetVersion target) {
         if (target == GLSLTargetVersion::Desktop_GL330_Core) {
             ss << "#version 330 core\n";
+        } else if (target == GLSLTargetVersion::Vulkan_GLSL460) {
+            ss << "#version 460\n";
         } else {
             ss << "#version 300 es\n"
                << "precision highp float;\n"
@@ -264,8 +269,161 @@ namespace SlipShaderGraph {
            << "}\n\n";
     }
 
-    void ShaderGraphCompiler::AppendLightingStructsAndUniforms(std::ostringstream& ss, const ShaderCompilerOptions& options) {
-        (void)options;
+    void ShaderGraphCompiler::AppendLightingStructsAndUniforms(
+        std::ostringstream& ss,
+        const ShaderCompilerOptions& options,
+        int startVulkanSamplerBinding
+    ) {
+        if (options.targetVersion == GLSLTargetVersion::Vulkan_GLSL460) {
+            int b = std::max(startVulkanSamplerBinding, 0);
+            ss << "// --- DDGI Legacy & Environment Samplers (Vulkan Set 0) ---\n"
+               << "layout(set = 0, binding = " << b << ") uniform sampler2D u_DDGIIrr[5];\n";
+            b += 5;
+            ss << "layout(set = 0, binding = " << b << ") uniform sampler2D u_DDGIVis[5];\n";
+            b += 5;
+            ss << "layout(set = 0, binding = " << b++ << ") uniform samplerCube u_EnvCube;\n"
+               << "layout(set = 0, binding = " << b++ << ") uniform sampler2D u_LightmapAtlas;\n"
+               << "layout(set = 0, binding = " << b++ << ") uniform sampler2DArray u_ShadowMapArray;\n"
+               << "layout(set = 0, binding = " << b++ << ") uniform sampler2D u_CloudShadowNoise;\n\n"
+               << "// --- Lighting Structs and Arrays ---\n"
+               << "struct DirectionalLight {\n"
+               << "    vec3 direction;\n"
+               << "    vec3 color;\n"
+               << "    float intensity;\n"
+               << "};\n"
+               << "struct PointLight {\n"
+               << "    vec3 position;\n"
+               << "    vec3 color;\n"
+               << "    float intensity;\n"
+               << "    float range;\n"
+               << "};\n"
+               << "struct SpotLight {\n"
+               << "    vec3 position;\n"
+               << "    vec3 direction;\n"
+               << "    vec3 color;\n"
+               << "    float intensity;\n"
+               << "    float range;\n"
+               << "    float spotAngle;\n"
+               << "};\n\n"
+               << "#define MAX_DIR_LIGHTS 4\n"
+               << "#define MAX_POINT_LIGHTS 32\n"
+               << "#define MAX_SPOT_LIGHTS 4\n"
+               << "struct GpuClusteredLight {\n"
+               << "    vec4 position_range;\n"
+               << "    vec4 color_intensity;\n"
+               << "    vec4 direction_spotAngle;\n"
+               << "    uvec4 params;\n"
+               << "};\n"
+               << "layout(std430, set = 2, binding = 0) readonly buffer LightsBuffer {\n"
+               << "    GpuClusteredLight u_Lights[];\n"
+               << "};\n"
+               << "layout(std430, set = 2, binding = 1) readonly buffer ClusterGridBuffer {\n"
+               << "    uvec2 u_ClusterGrid[];\n"
+               << "};\n"
+               << "layout(std430, set = 2, binding = 2) readonly buffer LightIndexBuffer {\n"
+               << "    uint u_GlobalLightIndexList[];\n"
+               << "};\n\n"
+               << "layout(std140, set = 1, binding = 2) uniform GraphLightingUBO {\n"
+               << "    int   u_DDGIEnabled;\n"
+               << "    float u_DDGIIntensity;\n"
+               << "    int   u_DDGIOctRes;\n"
+               << "    int   u_DDGIProbeTexel;\n"
+               << "    vec3  u_DDGISkyColor;\n"
+               << "    float _padSky0;\n"
+               << "    vec3  u_DDGIGroundColor;\n"
+               << "    float _padGnd0;\n"
+               << "    vec3  u_DDGIOrigin[5];\n"
+               << "    vec3  u_DDGISpacing[5];\n"
+               << "    ivec3 u_DDGICounts[5];\n"
+               << "    vec2  u_DDGIAtlas[5];\n"
+               << "    int   u_DDGIFollow[5];\n"
+               << "    int   u_DDGIOn[5];\n"
+               << "    int   u_DDGIRow[5];\n"
+               << "    int   u_HasEnvCube;\n"
+               << "    float u_EnvIntensity;\n"
+               << "    float u_ReflectionRoughnessCutoff;\n"
+               << "    int   u_NumDirLights;\n"
+               << "    DirectionalLight u_DirLights[MAX_DIR_LIGHTS];\n"
+               << "    int   u_NumPointLights;\n"
+               << "    PointLight u_PointLights[MAX_POINT_LIGHTS];\n"
+               << "    int   u_NumSpotLights;\n"
+               << "    SpotLight u_SpotLights[MAX_SPOT_LIGHTS];\n"
+               << "    int   u_ClusteredLightingEnabled;\n"
+               << "    uvec3 u_ClusterGridDim;\n"
+               << "    vec2  u_ClusterTileSize;\n"
+               << "    float u_ClusterZNear;\n"
+               << "    float u_ClusterZFar;\n"
+               << "    float u_ClusterLogZFactor;\n"
+               << "    int   u_HasLightmap;\n"
+               << "    vec4  u_LightmapScaleOffset;\n"
+               << "    mat4  u_LightSpaceMatrices[4];\n"
+               << "    float u_CascadeEndClipSpace[4];\n"
+               << "    int   u_CascadeCount;\n"
+               << "    float u_ShadowBias;\n"
+               << "    int   u_ShadowsEnabled;\n"
+               << "    int   u_PCFQuality;\n"
+               << "    int   u_CloudShadowsEnabled;\n"
+               << "    float u_CloudShadowIntensity;\n"
+               << "    float u_CloudBaseHeight;\n"
+               << "    float u_CloudScale;\n"
+               << "    vec2  u_CloudWindOffset;\n"
+               << "    float u_CloudCoverage;\n"
+               << "    float u_CloudLayerThickness;\n"
+               << "    float u_CloudDensity;\n"
+               << "    float u_CloudEdgeErosion;\n"
+               << "    float u_CloudDetailScale;\n"
+               << "    float u_Absorption;\n"
+               << "} uLit;\n"
+               << "#define u_DDGIEnabled (uLit.u_DDGIEnabled != 0)\n"
+               << "#define u_DDGIIntensity uLit.u_DDGIIntensity\n"
+               << "#define u_DDGIOctRes uLit.u_DDGIOctRes\n"
+               << "#define u_DDGIProbeTexel uLit.u_DDGIProbeTexel\n"
+               << "#define u_DDGISkyColor uLit.u_DDGISkyColor\n"
+               << "#define u_DDGIGroundColor uLit.u_DDGIGroundColor\n"
+               << "#define u_DDGIOrigin uLit.u_DDGIOrigin\n"
+               << "#define u_DDGISpacing uLit.u_DDGISpacing\n"
+               << "#define u_DDGICounts uLit.u_DDGICounts\n"
+               << "#define u_DDGIAtlas uLit.u_DDGIAtlas\n"
+               << "#define u_DDGIFollow uLit.u_DDGIFollow\n"
+               << "#define u_DDGIOn uLit.u_DDGIOn\n"
+               << "#define u_DDGIRow uLit.u_DDGIRow\n"
+               << "#define u_HasEnvCube (uLit.u_HasEnvCube != 0)\n"
+               << "#define u_EnvIntensity uLit.u_EnvIntensity\n"
+               << "#define u_ReflectionRoughnessCutoff uLit.u_ReflectionRoughnessCutoff\n"
+               << "#define u_NumDirLights uLit.u_NumDirLights\n"
+               << "#define u_DirLights uLit.u_DirLights\n"
+               << "#define u_NumPointLights uLit.u_NumPointLights\n"
+               << "#define u_PointLights uLit.u_PointLights\n"
+               << "#define u_NumSpotLights uLit.u_NumSpotLights\n"
+               << "#define u_SpotLights uLit.u_SpotLights\n"
+               << "#define u_ClusteredLightingEnabled (uLit.u_ClusteredLightingEnabled != 0)\n"
+               << "#define u_ClusterGridDim uLit.u_ClusterGridDim\n"
+               << "#define u_ClusterTileSize uLit.u_ClusterTileSize\n"
+               << "#define u_ClusterZNear uLit.u_ClusterZNear\n"
+               << "#define u_ClusterZFar uLit.u_ClusterZFar\n"
+               << "#define u_ClusterLogZFactor uLit.u_ClusterLogZFactor\n"
+               << "#define u_HasLightmap (uLit.u_HasLightmap != 0)\n"
+               << "#define u_LightmapScaleOffset uLit.u_LightmapScaleOffset\n"
+               << "#define u_LightSpaceMatrices uLit.u_LightSpaceMatrices\n"
+               << "#define u_CascadeEndClipSpace uLit.u_CascadeEndClipSpace\n"
+               << "#define u_CascadeCount uLit.u_CascadeCount\n"
+               << "#define u_ShadowBias uLit.u_ShadowBias\n"
+               << "#define u_ShadowsEnabled (uLit.u_ShadowsEnabled != 0)\n"
+               << "#define u_PCFQuality uLit.u_PCFQuality\n"
+               << "#define u_CloudShadowsEnabled (uLit.u_CloudShadowsEnabled != 0)\n"
+               << "#define u_CloudShadowIntensity uLit.u_CloudShadowIntensity\n"
+               << "#define u_CloudBaseHeight uLit.u_CloudBaseHeight\n"
+               << "#define u_CloudScale uLit.u_CloudScale\n"
+               << "#define u_CloudWindOffset uLit.u_CloudWindOffset\n"
+               << "#define u_CloudCoverage uLit.u_CloudCoverage\n"
+               << "#define u_CloudLayerThickness uLit.u_CloudLayerThickness\n"
+               << "#define u_CloudDensity uLit.u_CloudDensity\n"
+               << "#define u_CloudEdgeErosion uLit.u_CloudEdgeErosion\n"
+               << "#define u_CloudDetailScale uLit.u_CloudDetailScale\n"
+               << "#define u_Absorption uLit.u_Absorption\n\n";
+            return;
+        }
+
         ss << "// --- DDGI Uniforms ---\n"
            << "uniform bool u_DDGIEnabled;\n"
            << "uniform float u_DDGIIntensity;\n"
@@ -470,6 +628,8 @@ namespace SlipShaderGraph {
         std::ostringstream ss;
         AppendGLSLVersionHeader(ss, options.targetVersion);
 
+        bool isVulkan = (options.targetVersion == GLSLTargetVersion::Vulkan_GLSL460);
+
         ss << "layout (location = 0) in vec3 aPos;\n"
            << "layout (location = 1) in vec3 aNormal;\n"
            << "layout (location = 2) in vec2 aTexCoords;\n"
@@ -477,25 +637,59 @@ namespace SlipShaderGraph {
            << "layout (location = 4) in vec3 aBitangent;\n"
            << "layout (location = 5) in ivec4 aBoneIDs;\n"
            << "layout (location = 6) in vec4 aWeights;\n"
-           << "layout (location = 7) in vec2 aTexCoords2;\n\n"
-           << "out vec3 vWorldPos;\n"
-           << "out vec3 vNormal;\n"
-           << "out vec2 vTexCoords;\n"
-           << "out vec2 vTexCoords2;\n"
-           << "out vec3 vTangent;\n"
-           << "out vec3 vBitangent;\n"
-           << "out vec3 vViewPos;\n\n"
-           << "uniform mat4 u_Model;\n"
-           << "uniform mat4 u_View;\n"
-           << "uniform mat4 u_Projection;\n"
-           << "uniform vec3 u_CameraPos;\n"
-           << "uniform float u_Time;\n"
-           << "uniform float u_DeltaTime;\n\n"
-           << "#define MAX_BONES 100\n"
-           << "uniform mat4 u_BoneTransforms[MAX_BONES];\n"
-           << "uniform int u_SkinningQuality;\n"
-           << "uniform bool u_HasBones;\n\n"
-           << "void main() {\n"
+           << "layout (location = 7) in vec2 aTexCoords2;\n\n";
+
+        if (isVulkan) {
+            ss << "layout (location = 0) out vec3 vWorldPos;\n"
+               << "layout (location = 1) out vec3 vNormal;\n"
+               << "layout (location = 2) out vec2 vTexCoords;\n"
+               << "layout (location = 3) out vec2 vTexCoords2;\n"
+               << "layout (location = 4) out vec3 vTangent;\n"
+               << "layout (location = 5) out vec3 vBitangent;\n"
+               << "layout (location = 6) out vec3 vViewPos;\n\n"
+               << "#define MAX_BONES 100\n"
+               << "layout(std140, set = 1, binding = 0) uniform GraphVertexUBO {\n"
+               << "    mat4 u_Model;\n"
+               << "    mat4 u_View;\n"
+               << "    mat4 u_Projection;\n"
+               << "    vec3 u_CameraPos;\n"
+               << "    float u_Time;\n"
+               << "    float u_DeltaTime;\n"
+               << "    int  u_SkinningQuality;\n"
+               << "    int  u_HasBones;\n"
+               << "    float _padVert0;\n"
+               << "    mat4 u_BoneTransforms[MAX_BONES];\n"
+               << "} uVert;\n"
+               << "#define u_Model uVert.u_Model\n"
+               << "#define u_View uVert.u_View\n"
+               << "#define u_Projection uVert.u_Projection\n"
+               << "#define u_CameraPos uVert.u_CameraPos\n"
+               << "#define u_Time uVert.u_Time\n"
+               << "#define u_DeltaTime uVert.u_DeltaTime\n"
+               << "#define u_BoneTransforms uVert.u_BoneTransforms\n"
+               << "#define u_SkinningQuality uVert.u_SkinningQuality\n"
+               << "#define u_HasBones (uVert.u_HasBones != 0)\n\n";
+        } else {
+            ss << "out vec3 vWorldPos;\n"
+               << "out vec3 vNormal;\n"
+               << "out vec2 vTexCoords;\n"
+               << "out vec2 vTexCoords2;\n"
+               << "out vec3 vTangent;\n"
+               << "out vec3 vBitangent;\n"
+               << "out vec3 vViewPos;\n\n"
+               << "uniform mat4 u_Model;\n"
+               << "uniform mat4 u_View;\n"
+               << "uniform mat4 u_Projection;\n"
+               << "uniform vec3 u_CameraPos;\n"
+               << "uniform float u_Time;\n"
+               << "uniform float u_DeltaTime;\n\n"
+               << "#define MAX_BONES 100\n"
+               << "uniform mat4 u_BoneTransforms[MAX_BONES];\n"
+               << "uniform int u_SkinningQuality;\n"
+               << "uniform bool u_HasBones;\n\n";
+        }
+
+        ss << "void main() {\n"
            << "    mat4 skinMatrix = mat4(1.0);\n"
            << "    if (u_HasBones && u_SkinningQuality > 0) {\n"
            << "        if (u_SkinningQuality >= 4) {\n"
@@ -539,14 +733,25 @@ namespace SlipShaderGraph {
     ) {
         std::ostringstream ss;
         AppendGLSLVersionHeader(ss, options.targetVersion);
+        bool isVulkan = (options.targetVersion == GLSLTargetVersion::Vulkan_GLSL460);
 
-        ss << "in vec3 vWorldPos;\n"
-           << "in vec3 vNormal;\n"
-           << "in vec2 vTexCoords;\n"
-           << "in vec2 vTexCoords2;\n"
-           << "in vec3 vTangent;\n"
-           << "in vec3 vBitangent;\n"
-           << "in vec3 vViewPos;\n\n";
+        if (isVulkan) {
+            ss << "layout(location = 0) in vec3 vWorldPos;\n"
+               << "layout(location = 1) in vec3 vNormal;\n"
+               << "layout(location = 2) in vec2 vTexCoords;\n"
+               << "layout(location = 3) in vec2 vTexCoords2;\n"
+               << "layout(location = 4) in vec3 vTangent;\n"
+               << "layout(location = 5) in vec3 vBitangent;\n"
+               << "layout(location = 6) in vec3 vViewPos;\n\n";
+        } else {
+            ss << "in vec3 vWorldPos;\n"
+               << "in vec3 vNormal;\n"
+               << "in vec2 vTexCoords;\n"
+               << "in vec2 vTexCoords2;\n"
+               << "in vec3 vTangent;\n"
+               << "in vec3 vBitangent;\n"
+               << "in vec3 vViewPos;\n\n";
+        }
 
         bool isLit = (graph.materialType == ShaderGraphType::Lit);
         if (isLit) {
@@ -556,64 +761,122 @@ namespace SlipShaderGraph {
             ss << "layout(location = 0) out vec4 FragColor;\n\n";
         }
 
-        ss << "// --- Global Engine Uniforms ---\n"
-           << "uniform vec3 u_CameraPos;\n"
-           << "uniform mat4 u_View;\n"
-           << "uniform mat4 u_Projection;\n"
-           << "uniform float u_Time;\n"
-           << "uniform float u_DeltaTime;\n\n";
-
-        // Blackboard Exposed Property Uniforms
-        ss << "// --- Blackboard Exposed Property Uniforms ---\n";
         int currentTexUnit = 20;
+        int nextVulkanBinding = 0;
         outTexBindings.clear();
         outExposedUniforms.clear();
 
-        for (const auto& prop : graph.properties) {
-            std::string uName = prop.GetUniformName();
-            outExposedUniforms.push_back(uName);
-
-            switch (prop.type) {
-                case PinType::Float:
-                    ss << "uniform float " << uName << ";\n";
-                    break;
-                case PinType::Vec2:
-                    ss << "uniform vec2 " << uName << ";\n";
-                    break;
-                case PinType::Vec3:
-                    ss << "uniform vec3 " << uName << ";\n";
-                    break;
-                case PinType::Vec4:
-                    ss << "uniform vec4 " << uName << ";\n";
-                    break;
-                case PinType::Boolean:
-                    ss << "uniform bool " << uName << ";\n";
-                    break;
-                case PinType::Texture2D: {
-                    ss << "uniform sampler2D " << uName << ";\n";
-                    CompiledTextureBinding b;
-                    b.propertyId = prop.id;
-                    b.uniformName = uName;
-                    b.textureUnit = currentTexUnit++;
-                    b.defaultTexturePath = prop.defaultTexturePath;
-                    outTexBindings.push_back(b);
-                    break;
-                }
-                case PinType::Matrix4:
-                    ss << "uniform mat4 " << uName << ";\n";
-                    break;
+        if (isVulkan) {
+            ss << "// --- Texture Samplers (Vulkan Set 0) ---\n";
+            for (const auto& prop : graph.properties) {
+                if (prop.type != PinType::Texture2D) continue;
+                std::string uName = prop.GetUniformName();
+                ss << "layout(set = 0, binding = " << nextVulkanBinding << ") uniform sampler2D " << uName << ";\n";
+                CompiledTextureBinding b;
+                b.propertyId = prop.id;
+                b.uniformName = uName;
+                b.textureUnit = nextVulkanBinding++;
+                b.defaultTexturePath = prop.defaultTexturePath;
+                outTexBindings.push_back(b);
             }
-        }
+            ss << "layout(set = 0, binding = " << nextVulkanBinding++ << ") uniform sampler2D u_MainTexture;\n\n";
 
-        // Fallback main texture sampler for unconnected sampler nodes
-        ss << "uniform sampler2D u_MainTexture;\n\n";
+            ss << "// --- Global & Blackboard Uniforms (Vulkan Set 1 Binding 1) ---\n"
+               << "layout(std140, set = 1, binding = 1) uniform GraphFragUBO {\n"
+               << "    vec3  u_CameraPos;\n"
+               << "    float u_Time;\n"
+               << "    mat4  u_View;\n"
+               << "    mat4  u_Projection;\n"
+               << "    float u_DeltaTime;\n"
+               << "    float _padFrag0;\n"
+               << "    float _padFrag1;\n"
+               << "    float _padFrag2;\n";
+
+            for (const auto& prop : graph.properties) {
+                std::string uName = prop.GetUniformName();
+                outExposedUniforms.push_back(uName);
+                switch (prop.type) {
+                    case PinType::Float:   ss << "    float " << uName << ";\n"; break;
+                    case PinType::Vec2:    ss << "    vec2  " << uName << ";\n"; break;
+                    case PinType::Vec3:    ss << "    vec3  " << uName << ";\n"; break;
+                    case PinType::Vec4:    ss << "    vec4  " << uName << ";\n"; break;
+                    case PinType::Boolean: ss << "    int   " << uName << ";\n"; break;
+                    case PinType::Matrix4: ss << "    mat4  " << uName << ";\n"; break;
+                    case PinType::Texture2D: break;
+                }
+            }
+            ss << "} uFrag;\n"
+               << "#define u_CameraPos uFrag.u_CameraPos\n"
+               << "#define u_Time uFrag.u_Time\n"
+               << "#define u_View uFrag.u_View\n"
+               << "#define u_Projection uFrag.u_Projection\n"
+               << "#define u_DeltaTime uFrag.u_DeltaTime\n";
+            for (const auto& prop : graph.properties) {
+                std::string uName = prop.GetUniformName();
+                if (prop.type == PinType::Boolean) {
+                    ss << "#define " << uName << " (uFrag." << uName << " != 0)\n";
+                } else if (prop.type != PinType::Texture2D) {
+                    ss << "#define " << uName << " uFrag." << uName << "\n";
+                }
+            }
+            ss << "\n";
+        } else {
+            ss << "// --- Global Engine Uniforms ---\n"
+               << "uniform vec3 u_CameraPos;\n"
+               << "uniform mat4 u_View;\n"
+               << "uniform mat4 u_Projection;\n"
+               << "uniform float u_Time;\n"
+               << "uniform float u_DeltaTime;\n\n";
+
+            // Blackboard Exposed Property Uniforms
+            ss << "// --- Blackboard Exposed Property Uniforms ---\n";
+
+            for (const auto& prop : graph.properties) {
+                std::string uName = prop.GetUniformName();
+                outExposedUniforms.push_back(uName);
+
+                switch (prop.type) {
+                    case PinType::Float:
+                        ss << "uniform float " << uName << ";\n";
+                        break;
+                    case PinType::Vec2:
+                        ss << "uniform vec2 " << uName << ";\n";
+                        break;
+                    case PinType::Vec3:
+                        ss << "uniform vec3 " << uName << ";\n";
+                        break;
+                    case PinType::Vec4:
+                        ss << "uniform vec4 " << uName << ";\n";
+                        break;
+                    case PinType::Boolean:
+                        ss << "uniform bool " << uName << ";\n";
+                        break;
+                    case PinType::Texture2D: {
+                        ss << "uniform sampler2D " << uName << ";\n";
+                        CompiledTextureBinding b;
+                        b.propertyId = prop.id;
+                        b.uniformName = uName;
+                        b.textureUnit = currentTexUnit++;
+                        b.defaultTexturePath = prop.defaultTexturePath;
+                        outTexBindings.push_back(b);
+                        break;
+                    }
+                    case PinType::Matrix4:
+                        ss << "uniform mat4 " << uName << ";\n";
+                        break;
+                }
+            }
+
+            // Fallback main texture sampler for unconnected sampler nodes
+            ss << "uniform sampler2D u_MainTexture;\n\n";
+        }
 
         // Procedural Math Library
         AppendProceduralMathLibrary(ss);
 
         // Lit-specific PBR structures and functions
         if (isLit) {
-            AppendLightingStructsAndUniforms(ss, options);
+            AppendLightingStructsAndUniforms(ss, options, isVulkan ? nextVulkanBinding : 0);
             AppendPBRFunctions(ss, options);
         }
 
@@ -848,12 +1111,6 @@ namespace SlipShaderGraph {
                << "        vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);\n"
                << "        float NdotL = max(dot(N, L), 0.0);\n"
                << "        Lo += (kD * albedo / PI + specular) * radiance * NdotL;\n"
-               << "    }\n"
-               << "    }\n\n"
-               << "    if (u_HasLightmap) {\n"
-               << "        vec2 lmUV = vTexCoords2 * u_LightmapScaleOffset.xy + u_LightmapScaleOffset.zw;\n"
-               << "        vec3 bakedIrr = texture(u_LightmapAtlas, lmUV).rgb;\n"
-               << "        Lo += bakedIrr * albedo * (1.0 - metallic);\n"
                << "    }\n\n"
                << "    // Spot Lights Loop\n"
                << "    for (int i = 0; i < u_NumSpotLights && i < MAX_SPOT_LIGHTS; ++i) {\n"
@@ -1009,6 +1266,60 @@ namespace SlipShaderGraph {
         clone.AddLink(cloneNode->id, outPort, master->id, "Color");
 
         return Compile(clone, options);
+    }
+
+    GeneratedShaderCode ShaderGraphCompiler::CompileToVulkanSpirv(
+        const ShaderGraph& graph,
+        const ShaderCompilerOptions& options,
+        bool enableCache,
+        const std::string& cacheDir
+    ) {
+        ShaderCompilerOptions vkOptions = options;
+        vkOptions.targetVersion = GLSLTargetVersion::Vulkan_GLSL460;
+
+        GeneratedShaderCode code = Compile(graph, vkOptions);
+        if (!code.success) {
+            return code;
+        }
+
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+        const std::string tag = (graph.materialType == ShaderGraphType::Unlit) ? "ShaderGraphUnlit" : "ShaderGraphLit";
+        SpirvCompileResult vsRes = SlipSpirvCompiler::CompileGLSL(
+            code.vertexSource,
+            SpirvShaderStage::Vertex,
+            tag + ".vert",
+            enableCache,
+            cacheDir
+        );
+        if (!vsRes.success || vsRes.spirv.empty()) {
+            code.success = false;
+            code.errorMessage = "Vulkan SPIR-V vertex compile failed: " + vsRes.errorLog;
+            return code;
+        }
+
+        SpirvCompileResult fsRes = SlipSpirvCompiler::CompileGLSL(
+            code.fragmentSource,
+            SpirvShaderStage::Fragment,
+            tag + ".frag",
+            enableCache,
+            cacheDir
+        );
+        if (!fsRes.success || fsRes.spirv.empty()) {
+            code.success = false;
+            code.errorMessage = "Vulkan SPIR-V fragment compile failed: " + fsRes.errorLog;
+            return code;
+        }
+
+        code.vertexSpirv = std::move(vsRes.spirv);
+        code.fragmentSpirv = std::move(fsRes.spirv);
+        return code;
+#else
+        (void)enableCache;
+        (void)cacheDir;
+        code.success = false;
+        code.errorMessage = "Vulkan SPIR-V compilation is disabled on this platform.";
+        return code;
+#endif
     }
 
 } // namespace SlipShaderGraph

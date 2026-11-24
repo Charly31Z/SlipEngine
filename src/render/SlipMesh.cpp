@@ -160,7 +160,11 @@ void SlipMesh::clean()
 
     for (int i = 0; i < meshes.size(); i++)
     {
-        if (!isUnifiedBuffer) {
+        if (!isUnifiedBuffer
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+            && glad_glDeleteVertexArrays
+#endif
+        ) {
             if (meshes[i].VAO != 0) glDeleteVertexArrays(1, &meshes[i].VAO);
             if (meshes[i].VBO != 0) glDeleteBuffers(1, &meshes[i].VBO);
             if (meshes[i].EBO != 0) glDeleteBuffers(1, &meshes[i].EBO);
@@ -637,6 +641,10 @@ void SlipMesh::loadMatFromFile()
 
 void SlipMesh::setupMesh()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenVertexArrays) return;
+#endif
+
     if (isUnifiedBuffer && !m_UnifiedVertices.empty() && !m_UnifiedIndices.empty()) {
         glGenVertexArrays(1, &masterVAO);
         glGenBuffers(1, &masterVBO);

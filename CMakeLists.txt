@@ -65,6 +65,15 @@ else()
     find_package(glad CONFIG REQUIRED)
     find_package(assimp CONFIG REQUIRED)
     find_package(meshoptimizer CONFIG REQUIRED)
+
+    option(SLIP_ENABLE_VULKAN "Habilitar backend Vulkan en PC" ON)
+    if(SLIP_ENABLE_VULKAN)
+        find_package(VulkanHeaders CONFIG REQUIRED)
+        find_package(volk CONFIG REQUIRED)
+        find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+        find_package(unofficial-shaderc CONFIG REQUIRED)
+        add_compile_definitions(SLIP_ENABLE_VULKAN)
+    endif()
 endif()
 
 # Opción para aislar completamente el Editor y las herramientas de cocinado offline (Assimp + meshoptimizer)
@@ -107,6 +116,10 @@ file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/editor/SlipClusterBuilder.cpp"
 )
 
+if(ANDROID OR NOT SLIP_ENABLE_VULKAN)
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX ".*[/\\\\]render[/\\\\]vulkan[/\\\\].*\\.cpp$")
+endif()
+
 # -------------------------------------------------------------
 # Directorios de InclusiÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³n Comunes
 # -------------------------------------------------------------
@@ -115,6 +128,8 @@ set(SLIP_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/SlipEngine
     ${CMAKE_CURRENT_SOURCE_DIR}/include/SlipEngine/core
     ${CMAKE_CURRENT_SOURCE_DIR}/include/SlipEngine/render
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/SlipEngine/render/rhi
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/SlipEngine/render/vulkan
     ${CMAKE_CURRENT_SOURCE_DIR}/include/SlipEngine/render/shadergraph
     ${CMAKE_CURRENT_SOURCE_DIR}/include/SlipEngine/scene
     ${CMAKE_CURRENT_SOURCE_DIR}/include/SlipEngine/gameplay
@@ -208,6 +223,18 @@ else()
         ${LUA_LIBRARIES}
         ${PLATFORM_LIBS}
     )
+
+    if(SLIP_ENABLE_VULKAN)
+        target_compile_definitions(SlipEngine PRIVATE VK_NO_PROTOTYPES SLIP_USE_VOLK)
+        target_link_libraries(SlipEngine PUBLIC
+            Vulkan::Headers
+        )
+        target_link_libraries(SlipEngine PRIVATE
+            volk::volk
+            GPUOpen::VulkanMemoryAllocator
+            unofficial::shaderc::shaderc
+        )
+    endif()
 
     # 2. Ejecutable Runner de escritorio (SlipRunner.exe)
     add_executable(SlipRunner "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
@@ -392,6 +419,47 @@ else()
         SDL2::SDL2main
         glad::glad
     )
+
+    # 14. Suite de Pruebas de Inicializacion Vulkan RHI + SPIR-V
+    if(SLIP_ENABLE_VULKAN)
+        add_executable(SlipTestVulkanInit
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vulkan_init.cpp"
+        )
+        target_compile_definitions(SlipTestVulkanInit PRIVATE SLIP_USE_DLL VK_NO_PROTOTYPES)
+        target_include_directories(SlipTestVulkanInit PRIVATE ${SLIP_INCLUDE_DIRS})
+        target_link_libraries(SlipTestVulkanInit PRIVATE
+            SlipEngine
+            SDL2::SDL2
+            SDL2::SDL2main
+            volk::volk
+        )
+
+        # 15. Suite de Pruebas de Escena Vulkan (G-Buffer + Direct Lighting + Sky)
+        add_executable(SlipTestVulkanScene
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vulkan_scene.cpp"
+        )
+        target_compile_definitions(SlipTestVulkanScene PRIVATE SLIP_USE_DLL VK_NO_PROTOTYPES)
+        target_include_directories(SlipTestVulkanScene PRIVATE ${SLIP_INCLUDE_DIRS})
+        target_link_libraries(SlipTestVulkanScene PRIVATE
+            SlipEngine
+            SDL2::SDL2
+            SDL2::SDL2main
+            volk::volk
+        )
+
+        # 16. Suite de Pruebas Hardware Ray Tracing GI + Path Tracing + Scene Load
+        add_executable(SlipTestVulkanRTGI
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vulkan_rtgi.cpp"
+        )
+        target_compile_definitions(SlipTestVulkanRTGI PRIVATE SLIP_USE_DLL VK_NO_PROTOTYPES)
+        target_include_directories(SlipTestVulkanRTGI PRIVATE ${SLIP_INCLUDE_DIRS})
+        target_link_libraries(SlipTestVulkanRTGI PRIVATE
+            SlipEngine
+            SDL2::SDL2
+            SDL2::SDL2main
+            volk::volk
+        )
+    endif()
 
 endif()
 

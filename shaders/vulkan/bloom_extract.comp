@@ -1,0 +1,57 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uHdrIn;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D uBloomOut;
+layout(set = 0, binding = 2) uniform PostProcessUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 sunDir;
+    vec4 sunColor;
+    vec4 bloomParams;     // x=enabled, y=intensity, z=threshold, w=softKnee
+    vec4 bloomTint;       // rgb=tint, w=radius
+    vec4 lensParams;      // x=enabled, y=intensity, z=threshold, w=halo
+    vec4 colorParams;     // x=exposureMul, y=contrast, z=saturation, w=temperature
+    vec4 lift;            // rgb, w=tonemapMode
+    vec4 gamma;           // rgb, w=vignetteIntensity
+    vec4 gain;            // rgb, w=vignetteSmoothness
+    vec4 colorFilter;     // rgb, w=blurRadius
+    vec4 radialLetterbox; // x=radialStrength, y=centerX, z=centerY, w=letterbox
+    vec4 fogParams0;      // x=enabled, y=density, z=heightFalloff, w=fogHeight
+    vec4 fogParams1;      // x=startDist, y=maxDist, z=sunScattering, w=skyBlend
+    vec4 fogColor;        // rgb, w=pillarbox
+    ivec4 flags;          // x=outlineEnabled, y=hasGBuffer, z=fxaaEnabled, w=unused
+} uPost;
+
+vec3 ExtractBright(vec3 hdr, float threshold, float knee) {
+    float lum = max(hdr.r, max(hdr.g, hdr.b));
+    float soft = clamp(lum - threshold + knee, 0.0, 2.0 * max(knee, 1e-4));
+    soft = (soft * soft) / (4.0 * max(knee, 1e-4));
+    float contrib = max(soft, lum - threshold) / max(lum, 1e-4);
+    return hdr * clamp(contrib, 0.0, 4.0);
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uBloomOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    vec2 texel = 0.5 / vec2(size);
+
+    vec3 c0 = textureLod(uHdrIn, uv + vec2(-texel.x, -texel.y), 0.0).rgb;
+    vec3 c1 = textureLod(uHdrIn, uv + vec2( texel.x, -texel.y), 0.0).rgb;
+    vec3 c2 = textureLod(uHdrIn, uv + vec2(-texel.x,  texel.y), 0.0).rgb;
+    vec3 c3 = textureLod(uHdrIn, uv + vec2( texel.x,  texel.y), 0.0).rgb;
+    vec3 hdr = max((c0 + c1 + c2 + c3) * 0.25, vec3(0.0));
+    if (any(isnan(hdr)) || any(isinf(hdr))) hdr = vec3(0.0);
+
+    vec3 outCol = vec3(0.0);
+    if (uPost.bloomParams.x > 0.5 && uPost.bloomParams.y > 0.001) {
+        outCol += ExtractBright(hdr, uPost.bloomParams.z, uPost.bloomParams.w) * uPost.bloomTint.rgb * uPost.bloomParams.y;
+    }
+    if (uPost.lensParams.x > 0.5 && uPost.lensParams.y > 0.001) {
+        outCol += ExtractBright(hdr, uPost.lensParams.z, 0.5) * uPost.lensParams.y * 0.5;
+    }
+    imageStore(uBloomOut, pix, vec4(clamp(outCol, vec3(0.0), vec3(32.0)), 1.0));
+}

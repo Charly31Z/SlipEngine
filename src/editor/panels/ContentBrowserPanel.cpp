@@ -14,6 +14,7 @@
 #include "SlipEngine/editor/texteditor/SlipScriptIndexer.h"
 #include "SlipEngine/core/SlipConsole.h"
 #include "SlipEngine/editor/SlipThumbnailManager.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 #include <imgui.h>
 #include <filesystem>
 #include <algorithm>
@@ -577,12 +578,18 @@ void ContentBrowserPanel::OnImGuiRender() {
 
                 float imgW = thumbnailSize;
                 float imgH = thumbnailSize - 18.0f;
-                bool clicked = ImGui::ImageButton("##ThumbBtn",
-                                                  (ImTextureID)(uintptr_t)thumbTexId,
-                                                  ImVec2(imgW, imgH),
-                                                  ImVec2(0, 0), ImVec2(1, 1),
-                                                  ImVec4(0, 0, 0, 0),
-                                                  ImVec4(1, 1, 1, 1));
+                bool clicked = false;
+                if (SlipRHI::GetActiveAPI() == GraphicsAPI::OpenGL && thumbTexId != 0) {
+                    clicked = ImGui::ImageButton("##ThumbBtn",
+                                                 (ImTextureID)(uintptr_t)thumbTexId,
+                                                 ImVec2(imgW, imgH),
+                                                 ImVec2(0, 0), ImVec2(1, 1),
+                                                 ImVec4(0, 0, 0, 0),
+                                                 ImVec4(1, 1, 1, 1));
+                } else {
+                    const char* badge = entry.isDirectory ? "[DIR]" : (entry.extension.empty() ? "[FILE]" : entry.extension.c_str());
+                    clicked = ImGui::Button(badge, ImVec2(imgW, imgH));
+                }
                 ImGui::PopStyleColor(3);
 
                 bool isItemHovered = ImGui::IsItemHovered();
@@ -629,7 +636,8 @@ void ContentBrowserPanel::OnImGuiRender() {
                         ImGui::TextDisabled("Tipo: %s (%s)", typeDesc.c_str(), entry.extension.c_str());
                         ImGui::TextDisabled("Tamaño: %.2f KB", (float)entry.sizeInBytes / 1024.0f);
                     }
-                    if (!entry.isDirectory && thumbTexId != 0 &&
+                    if (SlipRHI::GetActiveAPI() == GraphicsAPI::OpenGL &&
+                        !entry.isDirectory && thumbTexId != 0 &&
                         thumbTexId != SlipThumbnailManager::Get().GetFileIcon() &&
                         thumbTexId != SlipThumbnailManager::Get().GetFolderIcon()) {
                         ImGui::Spacing();

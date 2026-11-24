@@ -1,0 +1,135 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uRtgiRaw;
+layout(set = 0, binding = 1) uniform sampler2D uRtgiPrevHistory;
+layout(set = 0, binding = 2) uniform sampler2D uRtReflRaw;
+layout(set = 0, binding = 3) uniform sampler2D uRtReflPrevHistory;
+layout(set = 0, binding = 4) uniform sampler2D uNormalRough;
+layout(set = 0, binding = 5) uniform sampler2D uDepth;
+layout(set = 0, binding = 6) uniform sampler2D uMotion;
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D uRtgiCurrHistory;
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D uRtReflCurrHistory;
+
+layout(set = 0, binding = 9) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+} uGi;
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uRtgiCurrHistory);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    float depth = texelFetch(uDepth, pix, 0).r;
+    if (depth >= 0.99999 || uGi.hasValidTLAS == 0) {
+        vec4 emptyGi = vec4(0.0, 0.0, 0.0, 1.0);
+        imageStore(uRtgiCurrHistory, pix, emptyGi);
+        imageStore(uRtReflCurrHistory, pix, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    vec4 centerGi = texelFetch(uRtgiRaw, pix, 0);
+    vec4 centerRefl = texelFetch(uRtReflRaw, pix, 0);
+    if (any(isnan(centerGi)) || any(isinf(centerGi))) centerGi = vec4(0.0, 0.0, 0.0, 1.0);
+    if (any(isnan(centerRefl)) || any(isinf(centerRefl))) centerRefl = vec4(0.0, 0.0, 0.0, 1.0);
+
+    if (uGi.giDenoiserEnabled == 0) {
+        imageStore(uRtgiCurrHistory, pix, centerGi);
+        imageStore(uRtReflCurrHistory, pix, centerRefl);
+        return;
+    }
+
+    vec4 centerNR = texelFetch(uNormalRough, pix, 0);
+    vec3 centerN = normalize(centerNR.xyz);
+    float centerRough = clamp(centerNR.w, 0.04, 1.0);
+    float centerLogD = log(max(1.0 - depth, 1e-5));
+
+    // Neighborhood mean & variance moments for anti-ghosting clamp
+    vec4 giM1 = vec4(0.0);
+    vec4 giM2 = vec4(0.0);
+    vec3 reflM1 = vec3(0.0);
+    vec3 reflM2 = vec3(0.0);
+    float momentCount = 0.0;
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
+            float qDepth = texelFetch(uDepth, q, 0).r;
+            if (qDepth >= 0.99999) continue;
+
+            vec3 qN = normalize(texelFetch(uNormalRough, q, 0).xyz);
+            float qLogD = log(max(1.0 - qDepth, 1e-5));
+            if (dot(centerN, qN) < 0.70 || abs(centerLogD - qLogD) > 0.25) continue;
+
+            vec4 qGi = texelFetch(uRtgiRaw, q, 0);
+            vec3 qRefl = texelFetch(uRtReflRaw, q, 0).rgb;
+            if (any(isnan(qGi)) || any(isinf(qGi))) qGi = centerGi;
+            if (any(isnan(qRefl)) || any(isinf(qRefl))) qRefl = centerRefl.rgb;
+
+            giM1 += qGi;
+            giM2 += qGi * qGi;
+            reflM1 += qRefl;
+            reflM2 += qRefl * qRefl;
+            momentCount += 1.0;
+        }
+    }
+
+    vec4 giMean = (momentCount > 0.5) ? (giM1 / momentCount) : centerGi;
+    vec4 giStd = (momentCount > 0.5) ? sqrt(max(giM2 / momentCount - giMean * giMean, vec4(0.0))) : vec4(0.0);
+    vec4 giMin = giMean - giStd * 1.75;
+    vec4 giMax = giMean + giStd * 1.75;
+
+    vec3 reflMean = (momentCount > 0.5) ? (reflM1 / momentCount) : centerRefl.rgb;
+    vec3 reflStd = (momentCount > 0.5) ? sqrt(max(reflM2 / momentCount - reflMean * reflMean, vec3(0.0))) : vec3(0.0);
+    vec3 reflMin = reflMean - reflStd * 1.85;
+    vec3 reflMax = reflMean + reflStd * 1.85;
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    vec2 motion = texelFetch(uMotion, pix, 0).rg;
+    vec2 prevUV = uv - motion;
+
+    vec4 giResult = centerGi;
+    vec3 reflResult = centerRefl.rgb;
+
+    if (uGi.frameIndex > 0u && all(greaterThan(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
+        float prevDepth = textureLod(uDepth, prevUV, 0.0).r;
+        vec3 prevN = normalize(textureLod(uNormalRough, prevUV, 0.0).xyz);
+        float prevLogD = log(max(1.0 - prevDepth, 1e-5));
+        if (prevDepth < 0.99999 && dot(centerN, prevN) > 0.85 && abs(centerLogD - prevLogD) < 0.08) {
+            vec4 prevGi = textureLod(uRtgiPrevHistory, prevUV, 0.0);
+            if (!any(isnan(prevGi)) && !any(isinf(prevGi))) {
+                vec4 clampedGi = clamp(prevGi, giMin, giMax);
+                float alphaGi = clamp(uGi.giTemporalAlpha, 0.03, 0.35);
+                giResult = mix(clampedGi, centerGi, alphaGi);
+            }
+
+            vec3 prevRefl = textureLod(uRtReflPrevHistory, prevUV, 0.0).rgb;
+            if (!any(isnan(prevRefl)) && !any(isinf(prevRefl))) {
+                vec3 clampedRefl = clamp(prevRefl, reflMin, reflMax);
+                float alphaRefl = mix(clamp(uGi.giTemporalAlpha, 0.04, 0.25), 0.28, 1.0 - smoothstep(0.06, 0.35, centerRough));
+                reflResult = mix(clampedRefl, centerRefl.rgb, alphaRefl);
+            }
+        }
+    }
+
+    if (any(isnan(giResult)) || any(isinf(giResult))) giResult = vec4(0.0, 0.0, 0.0, 1.0);
+    if (any(isnan(reflResult)) || any(isinf(reflResult))) reflResult = vec3(0.0);
+
+    imageStore(uRtgiCurrHistory, pix, vec4(max(giResult.rgb, vec3(0.0)), clamp(giResult.a, 0.0, 1.0)));
+    imageStore(uRtReflCurrHistory, pix, vec4(max(reflResult, vec3(0.0)), 1.0));
+}

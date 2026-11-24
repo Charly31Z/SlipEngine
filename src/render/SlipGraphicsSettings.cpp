@@ -14,6 +14,7 @@ SlipGraphicsSettings::SlipGraphicsSettings() {
 }
 
 void SlipGraphicsSettings::ResetToDefaults() {
+    m_Data.graphicsAPI = SlipGraphicsAPI::OpenGL;
     m_Data.shadowsEnabled = true;
     m_Data.shadowResolution = 2048;
     m_Data.cascadeCount = 4;
@@ -23,14 +24,19 @@ void SlipGraphicsSettings::ResetToDefaults() {
     m_Data.cascadeLambda = 0.85f;
     m_Data.fxAAEnabled = true;
     m_Data.fxAAQuality = 1;
-    m_Data.ddgiEnabled = true;
-    m_Data.ddgiCameraVolume = true;
-    m_Data.ddgiSpacing = 2.0f;
-    m_Data.ddgiProbesPerFrame = 256;
-    m_Data.ddgiRaysPerProbe = 64;
-    m_Data.ddgiHysteresis = 0.78f;
-    m_Data.ddgiIntensity = 1.0f;
-    m_Data.ddgiShowProbes = false;
+    m_Data.giMode = GlobalIlluminationMode::RTGI;
+    m_Data.ptMode = PathTracingMode::Progressive;
+    m_Data.giBounces = 2;
+    m_Data.giRaysPerPixel = 2;
+    m_Data.giIntensity = 1.0f;
+    m_Data.giDenoiserEnabled = true;
+    m_Data.giTemporalAlpha = 0.08f;
+    m_Data.giRayTracedShadows = true;
+    m_Data.ptMaxSamples = 256;
+    m_Data.svgfAtrousIterations = 3;
+    m_Data.svgfSigmaLuminance = 2.0f;
+    m_Data.svgfSigmaNormal = 128.0f;
+    m_Data.svgfSigmaDepth = 1.5f;
     m_Data.ssrEnabled = true;
     m_Data.ssrQuality = 2;
     m_Data.ssrRoughnessCutoff = 0.75f;
@@ -92,7 +98,15 @@ bool SlipGraphicsSettings::LoadFromFile(const std::string& filePath) {
         std::string key = Trim(line.substr(0, eqPos));
         std::string val = Trim(line.substr(eqPos + 1));
 
-        if (key == "ShadowsEnabled") {
+        if (key == "GraphicsAPI") {
+            std::string lowerVal = val;
+            std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
+            if (lowerVal == "vulkan" || lowerVal == "vk") {
+                m_Data.graphicsAPI = SlipGraphicsAPI::Vulkan;
+            } else if (lowerVal == "opengl" || lowerVal == "gl") {
+                m_Data.graphicsAPI = SlipGraphicsAPI::OpenGL;
+            }
+        } else if (key == "ShadowsEnabled") {
             std::string lowerVal = val;
             std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
             m_Data.shadowsEnabled = (lowerVal == "true" || lowerVal == "1" || lowerVal == "yes");
@@ -108,28 +122,50 @@ bool SlipGraphicsSettings::LoadFromFile(const std::string& filePath) {
             try { m_Data.pcfQuality = std::clamp(std::stoi(val), 0, 2); } catch (...) {}
         } else if (key == "CascadeLambda") {
             try { m_Data.cascadeLambda = std::clamp(std::stof(val), 0.0f, 1.0f); } catch (...) {}
-        } else if (key == "DDGIEnabled") {
+        } else if (key == "GIMode") {
             std::string lowerVal = val;
             std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
-            m_Data.ddgiEnabled = (lowerVal == "true" || lowerVal == "1" || lowerVal == "yes");
-        } else if (key == "DDGICameraVolume") {
+            if (lowerVal == "off" || lowerVal == "0" || lowerVal == "none") {
+                m_Data.giMode = GlobalIlluminationMode::Off;
+            } else if (lowerVal == "pathtracing" || lowerVal == "pt" || lowerVal == "2") {
+                m_Data.giMode = GlobalIlluminationMode::PathTracing;
+            } else {
+                m_Data.giMode = GlobalIlluminationMode::RTGI;
+            }
+        } else if (key == "PTMode") {
             std::string lowerVal = val;
             std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
-            m_Data.ddgiCameraVolume = (lowerVal == "true" || lowerVal == "1" || lowerVal == "yes");
-        } else if (key == "DDGISpacing") {
-            try { m_Data.ddgiSpacing = std::clamp(std::stof(val), 0.5f, 16.0f); } catch (...) {}
-        } else if (key == "DDGIProbesPerFrame") {
-            try { m_Data.ddgiProbesPerFrame = std::clamp(std::stoi(val), 1, 256); } catch (...) {}
-        } else if (key == "DDGIRaysPerProbe") {
-            try { m_Data.ddgiRaysPerProbe = std::clamp(std::stoi(val), 8, 128); } catch (...) {}
-        } else if (key == "DDGIHysteresis") {
-            try { m_Data.ddgiHysteresis = std::clamp(std::stof(val), 0.0f, 0.98f); } catch (...) {}
-        } else if (key == "DDGIIntensity") {
-            try { m_Data.ddgiIntensity = std::clamp(std::stof(val), 0.0f, 8.0f); } catch (...) {}
-        } else if (key == "DDGIShowProbes") {
+            if (lowerVal == "realtimesvgf" || lowerVal == "svgf" || lowerVal == "realtime" || lowerVal == "1") {
+                m_Data.ptMode = PathTracingMode::RealtimeSVGF;
+            } else {
+                m_Data.ptMode = PathTracingMode::Progressive;
+            }
+        } else if (key == "GIBounces") {
+            try { m_Data.giBounces = std::clamp(std::stoi(val), 1, 8); } catch (...) {}
+        } else if (key == "GIRaysPerPixel") {
+            try { m_Data.giRaysPerPixel = std::clamp(std::stoi(val), 1, 4); } catch (...) {}
+        } else if (key == "GIIntensity") {
+            try { m_Data.giIntensity = std::clamp(std::stof(val), 0.0f, 4.0f); } catch (...) {}
+        } else if (key == "GIDenoiser") {
             std::string lowerVal = val;
             std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
-            m_Data.ddgiShowProbes = (lowerVal == "true" || lowerVal == "1" || lowerVal == "yes");
+            m_Data.giDenoiserEnabled = (lowerVal == "true" || lowerVal == "1" || lowerVal == "yes");
+        } else if (key == "GITemporalAlpha") {
+            try { m_Data.giTemporalAlpha = std::clamp(std::stof(val), 0.01f, 0.50f); } catch (...) {}
+        } else if (key == "GIRayTracedShadows") {
+            std::string lowerVal = val;
+            std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
+            m_Data.giRayTracedShadows = (lowerVal == "true" || lowerVal == "1" || lowerVal == "yes");
+        } else if (key == "PTMaxSamples") {
+            try { m_Data.ptMaxSamples = std::clamp(std::stoi(val), 0, 4096); } catch (...) {}
+        } else if (key == "SVGFAtrousIterations") {
+            try { m_Data.svgfAtrousIterations = std::clamp(std::stoi(val), 1, 5); } catch (...) {}
+        } else if (key == "SVGFSigmaLuminance") {
+            try { m_Data.svgfSigmaLuminance = std::clamp(std::stof(val), 0.25f, 8.0f); } catch (...) {}
+        } else if (key == "SVGFSigmaNormal") {
+            try { m_Data.svgfSigmaNormal = std::clamp(std::stof(val), 8.0f, 512.0f); } catch (...) {}
+        } else if (key == "SVGFSigmaDepth") {
+            try { m_Data.svgfSigmaDepth = std::clamp(std::stof(val), 0.1f, 8.0f); } catch (...) {}
         } else if (key == "SSREnabled") {
             std::string lowerVal = val;
             std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
@@ -221,6 +257,7 @@ bool SlipGraphicsSettings::SaveToFile(const std::string& filePath) {
     std::stringstream ss;
     ss << "; SlipEngine Graphics Settings\n";
     ss << "[Graphics]\n";
+    ss << "GraphicsAPI=" << (m_Data.graphicsAPI == SlipGraphicsAPI::Vulkan ? "Vulkan" : "OpenGL") << "\n";
     ss << "ShadowsEnabled=" << (m_Data.shadowsEnabled ? "true" : "false") << "\n";
     ss << "ShadowResolution=" << m_Data.shadowResolution << "\n";
     ss << "CascadeCount=" << m_Data.cascadeCount << "\n";
@@ -228,14 +265,19 @@ bool SlipGraphicsSettings::SaveToFile(const std::string& filePath) {
     ss << "ShadowBias=" << m_Data.shadowBias << "\n";
     ss << "PCFQuality=" << m_Data.pcfQuality << "\n";
     ss << "CascadeLambda=" << m_Data.cascadeLambda << "\n";
-    ss << "DDGIEnabled=" << (m_Data.ddgiEnabled ? "true" : "false") << "\n";
-    ss << "DDGICameraVolume=" << (m_Data.ddgiCameraVolume ? "true" : "false") << "\n";
-    ss << "DDGISpacing=" << m_Data.ddgiSpacing << "\n";
-    ss << "DDGIProbesPerFrame=" << m_Data.ddgiProbesPerFrame << "\n";
-    ss << "DDGIRaysPerProbe=" << m_Data.ddgiRaysPerProbe << "\n";
-    ss << "DDGIHysteresis=" << m_Data.ddgiHysteresis << "\n";
-    ss << "DDGIIntensity=" << m_Data.ddgiIntensity << "\n";
-    ss << "DDGIShowProbes=" << (m_Data.ddgiShowProbes ? "true" : "false") << "\n";
+    ss << "GIMode=" << (m_Data.giMode == GlobalIlluminationMode::Off ? "Off" : (m_Data.giMode == GlobalIlluminationMode::PathTracing ? "PathTracing" : "RTGI")) << "\n";
+    ss << "PTMode=" << (m_Data.ptMode == PathTracingMode::RealtimeSVGF ? "RealtimeSVGF" : "Progressive") << "\n";
+    ss << "GIBounces=" << m_Data.giBounces << "\n";
+    ss << "GIRaysPerPixel=" << m_Data.giRaysPerPixel << "\n";
+    ss << "GIIntensity=" << m_Data.giIntensity << "\n";
+    ss << "GIDenoiser=" << (m_Data.giDenoiserEnabled ? "true" : "false") << "\n";
+    ss << "GITemporalAlpha=" << m_Data.giTemporalAlpha << "\n";
+    ss << "GIRayTracedShadows=" << (m_Data.giRayTracedShadows ? "true" : "false") << "\n";
+    ss << "PTMaxSamples=" << m_Data.ptMaxSamples << "\n";
+    ss << "SVGFAtrousIterations=" << m_Data.svgfAtrousIterations << "\n";
+    ss << "SVGFSigmaLuminance=" << m_Data.svgfSigmaLuminance << "\n";
+    ss << "SVGFSigmaNormal=" << m_Data.svgfSigmaNormal << "\n";
+    ss << "SVGFSigmaDepth=" << m_Data.svgfSigmaDepth << "\n";
     ss << "SSREnabled=" << (m_Data.ssrEnabled ? "true" : "false") << "\n";
     ss << "SSRQuality=" << m_Data.ssrQuality << "\n";
     ss << "SSRRoughnessCutoff=" << m_Data.ssrRoughnessCutoff << "\n";

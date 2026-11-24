@@ -9,6 +9,15 @@ void SlipWindow::OnResize(int newWidth, int newHeight)
 {
     width = newWidth;
     height = newHeight;
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        if (ISlipRHI* rhi = SlipRHI::Get())
+        {
+            rhi->OnResize(width, height);
+        }
+        return;
+    }
+
     glViewport(0, 0, width, height);
     if (SlipFrameBuffer::GetInstance() != nullptr)
     {
@@ -16,7 +25,8 @@ void SlipWindow::OnResize(int newWidth, int newHeight)
     }
 }
 
-SlipWindow::SlipWindow(const char* title, int width, int height) : title(title), width(width), height(height), m_window(nullptr), m_glContext(nullptr)
+SlipWindow::SlipWindow(const char* title, int width, int height, GraphicsAPI api)
+    : title(title), width(width), height(height), m_window(nullptr), m_glContext(nullptr), m_GraphicsAPI(api)
 {
     assert(!m_instance && "Is already open the application...");
     m_instance = this;
@@ -24,6 +34,46 @@ SlipWindow::SlipWindow(const char* title, int width, int height) : title(title),
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0)
     {
         std::cout << "Failed to initialize SDL2: " << SDL_GetError() << std::endl;
+        return;
+    }
+
+#if defined(SLIP_PLATFORM_ANDROID) || defined(__ANDROID__)
+    m_GraphicsAPI = GraphicsAPI::OpenGL;
+#elif !defined(SLIP_ENABLE_VULKAN)
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        std::cout << "[SlipWindow] Vulkan no habilitado en compilacion; usando OpenGL." << std::endl;
+        m_GraphicsAPI = GraphicsAPI::OpenGL;
+    }
+#endif
+
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan)
+    {
+        Uint32 windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
+        m_window = SDL_CreateWindow(
+            title,
+            SDL_WINDOWPOS_CENTERED,
+            SDL_WINDOWPOS_CENTERED,
+            width,
+            height,
+            windowFlags
+        );
+
+        if (m_window == nullptr)
+        {
+            std::cout << "Failed to create Vulkan SDL_Window: " << SDL_GetError() << std::endl;
+            SDL_Quit();
+            return;
+        }
+
+        if (!SlipRHI::Create(GraphicsAPI::Vulkan, m_window, false))
+        {
+            std::cout << "Failed to initialize Vulkan RHI!" << std::endl;
+            SDL_DestroyWindow(m_window);
+            m_window = nullptr;
+            SDL_Quit();
+            return;
+        }
         return;
     }
 
@@ -85,15 +135,26 @@ SlipWindow::SlipWindow(const char* title, int width, int height) : title(title),
         return;
     }
 #endif
+
+    SlipRHI::Create(GraphicsAPI::OpenGL, m_window, false);
 }
 
 void SlipWindow::SetVSync(bool enabled)
 {
-    SDL_GL_SetSwapInterval(enabled ? 1 : 0);
+    if (ISlipRHI* rhi = SlipRHI::Get())
+    {
+        rhi->SetVSync(enabled);
+        return;
+    }
+    if (m_GraphicsAPI == GraphicsAPI::OpenGL)
+    {
+        SDL_GL_SetSwapInterval(enabled ? 1 : 0);
+    }
 }
 
 SlipWindow::~SlipWindow()
 {
+    SlipRHI::Destroy();
     if (m_glContext)
     {
         SDL_GL_DeleteContext(m_glContext);

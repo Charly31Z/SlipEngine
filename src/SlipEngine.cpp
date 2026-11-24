@@ -1,4 +1,8 @@
 #include "SlipEngine.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    #include "SlipEngine/render/vulkan/VulkanRHI.h"
+#endif
 #if defined(SLIP_PLATFORM_ANDROID) || defined(__ANDROID__)
     #include <GLES3/gl3.h>
     #include <GLES3/gl32.h>
@@ -79,78 +83,120 @@ SlipEngine::~SlipEngine() {
     Shutdown();
 }
 
-bool SlipEngine::Init(const char* title, int width, int height) {
+bool SlipEngine::Init(const char* title, int width, int height, GraphicsAPI api) {
     std::cout << "[SlipEngine] Inicializando SDL2..." << std::endl;
+
+    m_GraphicsAPI = api;
+#if defined(SLIP_PLATFORM_ANDROID) || defined(__ANDROID__)
+    m_GraphicsAPI = GraphicsAPI::OpenGL;
+#elif !defined(SLIP_ENABLE_VULKAN)
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan) {
+        std::cout << "[SlipEngine] Vulkan no habilitado en compilacion; usando OpenGL." << std::endl;
+        m_GraphicsAPI = GraphicsAPI::OpenGL;
+    }
+#endif
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
         std::cerr << "[SlipEngine Error] No se pudo inicializar SDL2: " << SDL_GetError() << std::endl;
         return false;
     }
 
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan) {
+        m_Window = SDL_CreateWindow(
+            title,
+            SDL_WINDOWPOS_CENTERED,
+            SDL_WINDOWPOS_CENTERED,
+            width,
+            height,
+            SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
+        );
+
+        if (!m_Window) {
+            std::cerr << "[SlipEngine Error] Fallo al crear SDL_Window Vulkan: " << SDL_GetError() << std::endl;
+            SDL_Quit();
+            return false;
+        }
+
+        ISlipRHI* rhi = SlipRHI::Create(GraphicsAPI::Vulkan, m_Window, false);
+        if (!rhi) {
+            std::cerr << "[SlipEngine Error] Fallo al inicializar Vulkan RHI." << std::endl;
+            SDL_DestroyWindow(m_Window);
+            m_Window = nullptr;
+            SDL_Quit();
+            return false;
+        }
+
+        const auto& caps = rhi->GetCapabilities();
+        std::cout << "[SlipEngine] Vulkan inicializado con exito. GPU: " << caps.deviceName
+                  << " (Vulkan " << caps.apiVersionMajor << "." << caps.apiVersionMinor << ")" << std::endl;
+    } else {
 #if defined(SLIP_PLATFORM_ANDROID) || defined(__ANDROID__)
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #else
-    // Configuración mínima de OpenGL (Versión 3.3 Core)
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        // Configuración mínima de OpenGL (Versión 3.3 Core)
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 #endif
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
-    // Crear la ventana de SDL2
-    m_Window = SDL_CreateWindow(
-        title,
-        SDL_WINDOWPOS_CENTERED,
-        SDL_WINDOWPOS_CENTERED,
-        width,
-        height,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
-    );
+        // Crear la ventana de SDL2
+        m_Window = SDL_CreateWindow(
+            title,
+            SDL_WINDOWPOS_CENTERED,
+            SDL_WINDOWPOS_CENTERED,
+            width,
+            height,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
+        );
 
-    if (!m_Window) {
-        std::cerr << "[SlipEngine Error] Fallo al crear SDL_Window: " << SDL_GetError() << std::endl;
-        SDL_Quit();
-        return false;
-    }
+        if (!m_Window) {
+            std::cerr << "[SlipEngine Error] Fallo al crear SDL_Window: " << SDL_GetError() << std::endl;
+            SDL_Quit();
+            return false;
+        }
 
-    // Crear contexto OpenGL
-    m_GLContext = SDL_GL_CreateContext(m_Window);
-    if (!m_GLContext) {
-        std::cerr << "[SlipEngine Error] Fallo al crear contexto OpenGL: " << SDL_GetError() << std::endl;
-        SDL_DestroyWindow(m_Window);
-        m_Window = nullptr;
-        SDL_Quit();
-        return false;
-    }
+        // Crear contexto OpenGL
+        m_GLContext = SDL_GL_CreateContext(m_Window);
+        if (!m_GLContext) {
+            std::cerr << "[SlipEngine Error] Fallo al crear contexto OpenGL: " << SDL_GetError() << std::endl;
+            SDL_DestroyWindow(m_Window);
+            m_Window = nullptr;
+            SDL_Quit();
+            return false;
+        }
 
-    // Vincular el contexto OpenGL al hilo actual
-    SDL_GL_MakeCurrent(m_Window, m_GLContext);
-    SDL_GL_SetSwapInterval(0); // V-Sync desactivado (0) para framerate ilimitado en PC
+        // Vincular el contexto OpenGL al hilo actual
+        SDL_GL_MakeCurrent(m_Window, m_GLContext);
+        SDL_GL_SetSwapInterval(0); // V-Sync desactivado (0) para framerate ilimitado en PC
 
 #if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
-    // CARGAR GLAD: Esencial antes de cualquier llamada de OpenGL
-    if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
-        std::cerr << "[SlipEngine Error] Fallo al inicializar GLAD (punteros OpenGL nulos)." << std::endl;
-        SDL_GL_DeleteContext(m_GLContext);
-        m_GLContext = nullptr;
-        SDL_DestroyWindow(m_Window);
-        m_Window = nullptr;
-        SDL_Quit();
-        return false;
-    }
+        // CARGAR GLAD: Esencial antes de cualquier llamada de OpenGL
+        if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
+            std::cerr << "[SlipEngine Error] Fallo al inicializar GLAD (punteros OpenGL nulos)." << std::endl;
+            SDL_GL_DeleteContext(m_GLContext);
+            m_GLContext = nullptr;
+            SDL_DestroyWindow(m_Window);
+            m_Window = nullptr;
+            SDL_Quit();
+            return false;
+        }
 #endif
 
-    std::cout << "[SlipEngine] OpenGL inicializado con exito. Version: " 
-              << glGetString(GL_VERSION) << std::endl;
+        SlipRHI::Create(GraphicsAPI::OpenGL, m_Window, false);
 
-    glEnable(GL_DEPTH_TEST);
+        std::cout << "[SlipEngine] OpenGL inicializado con exito. Version: "
+                  << glGetString(GL_VERSION) << std::endl;
 
-    // Inicializar shaders
-    SlipShaderLibrary::Init();
+        glEnable(GL_DEPTH_TEST);
+
+        // Inicializar shaders
+        SlipShaderLibrary::Init();
+    }
 
     // Cargar escena inicial configurada para el juego
     std::string startScene = DiscoverGameStartScene();
@@ -205,6 +251,11 @@ void SlipEngine::ProcessEvents() {
         else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(m_Window)) {
             m_IsRunning = false;
         }
+        else if (event.type == SDL_WINDOWEVENT && (event.window.event == SDL_WINDOWEVENT_RESIZED || event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)) {
+            if (ISlipRHI* rhi = SlipRHI::Get()) {
+                rhi->OnResize(event.window.data1, event.window.data2);
+            }
+        }
     }
 }
 
@@ -251,6 +302,31 @@ void SlipEngine::Update(float dt) {
 
 void SlipEngine::Render() {
     if (!m_Window) return;
+
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan) {
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+        if (VulkanRHI* vkRhi = dynamic_cast<VulkanRHI*>(SlipRHI::Get())) {
+            int w = 1280, h = 720;
+            SDL_GetWindowSize(m_Window, &w, &h);
+            float aspect = (h > 0) ? (static_cast<float>(w) / static_cast<float>(h)) : 1.777f;
+            CameraComponent* mainCam = SlipLevel::Get().GetMainCamera();
+            glm::vec3 eye(0.0f, 3.0f, 10.0f);
+            glm::mat4 view = glm::lookAt(eye, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 1000.0f);
+            if (mainCam) {
+                eye = mainCam->GetPosition();
+                view = mainCam->GetViewMatrix();
+                proj = mainCam->GetProjectionMatrix(aspect);
+            }
+            if (vkRhi->BeginFrame()) {
+                vkRhi->RenderSceneToSwapchain(&SlipLevel::Get(), view, proj, eye);
+                vkRhi->EndFrame();
+            }
+        }
+#endif
+        SlipLevel::Get().ProcessPendingSceneLoad();
+        return;
+    }
 
     int w = 1280, h = 720;
     SDL_GetWindowSize(m_Window, &w, &h);
@@ -430,6 +506,7 @@ void SlipEngine::Run() {
 }
 
 void SlipEngine::Shutdown() {
+    SlipRHI::Destroy();
     if (m_GLContext) {
         SDL_GL_DeleteContext(m_GLContext);
         m_GLContext = nullptr;

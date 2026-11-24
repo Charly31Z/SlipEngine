@@ -15,6 +15,7 @@
 #include "SlipEngine/tools/SlipFileSystem.h"
 #include "SlipEngine/core/SlipConsole.h"
 #include "SlipEngine/editor/SlipThumbnailManager.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 #include "SlipEngine/render/shadergraph/ShaderGraph.h"
 #include "SlipEngine/render/shadergraph/ShaderGraphSerializer.h"
 #include "SlipEngine/platform/SlipInputMap.h"
@@ -636,7 +637,12 @@ void InspectorPanel::OnImGuiRender() {
                     drawList->AddRectFilled(p0, p1, IM_COL32(18, 18, 22, 255));
                     drawList->AddRect(p0, p1, IM_COL32(60, 60, 75, 255));
 
-                    ImGui::Image((ImTextureID)(uintptr_t)tex->getID(), ImVec2(previewWidth, previewHeight), ImVec2(0, 0), ImVec2(1, 1));
+                    if (SlipRHI::GetActiveAPI() == GraphicsAPI::OpenGL) {
+                        ImGui::Image((ImTextureID)(uintptr_t)tex->getID(), ImVec2(previewWidth, previewHeight), ImVec2(0, 0), ImVec2(1, 1));
+                    } else {
+                        ImGui::Dummy(ImVec2(previewWidth, previewHeight));
+                        drawList->AddText(ImVec2(p0.x + 8.0f, p0.y + 8.0f), IM_COL32(180, 195, 220, 255), "Preview Vulkan (Fase 4)");
+                    }
 
                     if (m_SelectedEntity && m_SelectedEntity->GetComponent<MeshComponent>()) {
                         ImGui::Spacing();

@@ -92,6 +92,9 @@ SlipTexture* SlipTexture::reload(const char* image)
     auto it = s_TextureCache.find(resolvedPath);
     if (it != s_TextureCache.end() && it->second != nullptr) {
         if (it->second->ID != 0) {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+            if (glad_glDeleteTextures)
+#endif
             glDeleteTextures(1, &it->second->ID);
             it->second->ID = 0;
         }
@@ -203,6 +206,9 @@ SlipTexture* SlipTexture::load(const char* image)
 
 void SlipTexture::init()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenTextures) return;
+#endif
     glGenTextures(1, &ID);
 
     unsigned char* data = stbi_load_from_memory(imgData.data, (int)imgData.size, &width, &height, &nrComponents, 3);
@@ -241,6 +247,9 @@ void SlipTexture::init()
 
 void SlipTexture::bind(unsigned int unit)
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glActiveTexture || !glad_glBindTexture) return;
+#endif
     if (ID == 0 && !path.empty()) {
         // Intentar carga diferida si se creó antes de inicializar el contexto GL
         SlipTexture* loaded = SlipTexture::load(path.c_str());
@@ -265,6 +274,9 @@ void SlipTexture::draw()
 void SlipTexture::SetFilterMode(bool pointFilter)
 {
     if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glBindTexture) return;
+#endif
     glBindTexture(GL_TEXTURE_2D, ID);
     if (pointFilter) {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);

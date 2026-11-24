@@ -41,6 +41,7 @@ public:
 
 	void clean();
 	void cleanLines();
+	void ConsumePendingLines(std::vector<glm::vec3>& outLines);
 
 	virtual void    drawLine(const btVector3& from, const btVector3& to, const btVector3& fromColor, const btVector3& toColor);
 
@@ -89,6 +90,7 @@ public:
 
 	void clean();
 	void cleanLines();
+	void ConsumePendingLines(std::vector<glm::vec3>& outLines);
 
 	SlipDebug();
 };

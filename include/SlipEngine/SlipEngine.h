@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SlipExport.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 
 struct SDL_Window;
 typedef void* SDL_GLContext;
@@ -10,7 +11,7 @@ public:
     SlipEngine();
     ~SlipEngine();
 
-    bool Init(const char* title = "SlipEngine", int width = 1280, int height = 720);
+    bool Init(const char* title = "SlipEngine", int width = 1280, int height = 720, GraphicsAPI api = GraphicsAPI::OpenGL);
     bool IsRunning() const;
     void Run();
     void ProcessEvents();
@@ -32,6 +33,7 @@ private:
     bool m_IsRunning;
     SDL_Window* m_Window;
     SDL_GLContext m_GLContext;
+    GraphicsAPI m_GraphicsAPI = GraphicsAPI::OpenGL;
     float m_FixedDeltaTime;
     float m_Accumulator;
     int m_TargetFPS;

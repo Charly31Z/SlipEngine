@@ -3,12 +3,22 @@
   "version-string": "0.1.0",
   "dependencies": [
     "glm",
-    "sdl2",
+    {
+      "name": "sdl2",
+      "features": [
+        "vulkan"
+      ]
+    },
     "glad",
+    "vulkan-headers",
+    "volk",
+    "vulkan-memory-allocator",
+    "shaderc",
     {
       "name": "imgui",
       "features": [
         "opengl3-binding",
+        "vulkan-binding",
         "docking-experimental"
       ]
     },

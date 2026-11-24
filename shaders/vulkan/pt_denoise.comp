@@ -1,0 +1,134 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uPtAccumIn;      // DiffuseIrradiance (demodulated)
+layout(set = 0, binding = 1) uniform sampler2D uPtNormalRoughIn;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uHdrOut;
+
+layout(set = 0, binding = 3) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+} uGi;
+
+layout(set = 0, binding = 4) uniform sampler2D uPtAlbedoIn;
+layout(set = 0, binding = 5) uniform sampler2D uPtEmissiveIn;
+layout(set = 0, binding = 6) uniform sampler2D uPtDepthInstIn;
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D uPtIrrHistoryOut;
+layout(set = 0, binding = 8) uniform sampler2D uPtSpecAccumIn;  // SpecularRadiance (unmodulated by diffuse albedo)
+
+float Luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uHdrOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    vec4 centerIrr = texelFetch(uPtAccumIn, pix, 0);
+    if (any(isnan(centerIrr)) || any(isinf(centerIrr))) centerIrr = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 centerSpec = texelFetch(uPtSpecAccumIn, pix, 0);
+    if (any(isnan(centerSpec)) || any(isinf(centerSpec))) centerSpec = vec4(0.0, 0.0, 0.0, 1.0);
+
+    vec3 primaryAlbedo = max(texelFetch(uPtAlbedoIn, pix, 0).rgb, vec3(0.0));
+    vec3 primaryEmissive = max(texelFetch(uPtEmissiveIn, pix, 0).rgb, vec3(0.0));
+    if (any(isnan(primaryAlbedo)) || any(isinf(primaryAlbedo))) primaryAlbedo = vec3(1.0);
+    if (any(isnan(primaryEmissive)) || any(isinf(primaryEmissive))) primaryEmissive = vec3(0.0);
+
+    vec4 centerNormRough = texelFetch(uPtNormalRoughIn, pix, 0);
+    vec2 centerDepthInst = texelFetch(uPtDepthInstIn, pix, 0).rg;
+    float centerDist = centerDepthInst.x;
+    float centerInst = centerDepthInst.y;
+
+    if (centerDist <= 0.0001) {
+        vec3 skyRgb = max(centerIrr.rgb * primaryAlbedo + centerSpec.rgb + primaryEmissive, vec3(0.0));
+        imageStore(uPtIrrHistoryOut, pix, vec4(0.0, 0.0, 0.0, 0.0));
+        imageStore(uHdrOut, pix, vec4(skyRgb, 1.0));
+        return;
+    }
+
+    const bool isRealtimeSvgf = (uGi.giMode == 4);
+    if (uGi.giDenoiserEnabled == 0 || (!isRealtimeSvgf && uGi.sampleCount >= 32u)) {
+        vec3 cleanIrr  = max(centerIrr.rgb, vec3(0.0));
+        vec3 cleanSpec = max(centerSpec.rgb, vec3(0.0));
+        imageStore(uPtIrrHistoryOut, pix, vec4(cleanIrr, 1.0));
+        imageStore(uHdrOut, pix, vec4(cleanIrr * primaryAlbedo + cleanSpec + primaryEmissive, 1.0));
+        return;
+    }
+
+    vec3 centerN = normalize(centerNormRough.xyz);
+    float centerRough = clamp(centerNormRough.w, 0.04, 1.0);
+    float centerLuma = Luminance(centerIrr.rgb);
+    float centerSpecLuma = Luminance(centerSpec.rgb);
+    float blendStrength = isRealtimeSvgf
+        ? 0.92
+        : clamp(1.0 - float(max(uGi.sampleCount, 1u) - 1u) / 31.0, 0.0, 1.0);
+    float lumaPhi = isRealtimeSvgf ? 1.85 : mix(2.2, 0.45, 1.0 - blendStrength);
+    float specBlurFactor = (centerRough < 0.15) ? 0.0 : smoothstep(0.15, 0.45, centerRough);
+
+    vec3 sumIrr = centerIrr.rgb;
+    float sumW = 1.0;
+    vec3 sumSpec = centerSpec.rgb;
+    float sumSpecW = 1.0;
+
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 q = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
+            vec2 qDepthInst = texelFetch(uPtDepthInstIn, q, 0).rg;
+            if (qDepthInst.x <= 0.0001 || abs(centerInst - qDepthInst.y) > 0.5) continue;
+
+            vec4 qNR = texelFetch(uPtNormalRoughIn, q, 0);
+            vec3 qN = normalize(qNR.xyz);
+            float nW = pow(max(dot(centerN, qN), 0.0), 64.0);
+            float dRel = abs(centerDist - qDepthInst.x) / max(centerDist, 0.1);
+            float dW = exp(-dRel * dRel * 16.0);
+            float spatialW = exp(-0.18 * float(dx * dx + dy * dy));
+
+            vec3 qIrr = texelFetch(uPtAccumIn, q, 0).rgb;
+            if (!any(isnan(qIrr)) && !any(isinf(qIrr))) {
+                float lDiff = abs(centerLuma - Luminance(qIrr)) / max(lumaPhi, 0.1);
+                float w = spatialW * nW * dW * exp(-lDiff * lDiff * 0.5);
+                if (w > 1e-4) {
+                    sumIrr += qIrr * w;
+                    sumW += w;
+                }
+            }
+
+            if (specBlurFactor > 0.001) {
+                vec3 qSpec = texelFetch(uPtSpecAccumIn, q, 0).rgb;
+                if (!any(isnan(qSpec)) && !any(isinf(qSpec))) {
+                    float sDiff = abs(centerSpecLuma - Luminance(qSpec)) / max(lumaPhi * centerRough, 0.1);
+                    float rW = exp(-abs(centerRough - clamp(qNR.w, 0.04, 1.0)) / 0.06);
+                    float wS = spatialW * pow(max(dot(centerN, qN), 0.0), 128.0) * dW * rW * exp(-sDiff * sDiff * 0.5);
+                    if (wS > 1e-4) {
+                        sumSpec += qSpec * wS;
+                        sumSpecW += wS;
+                    }
+                }
+            }
+        }
+    }
+
+    vec3 filteredIrr = max(mix(centerIrr.rgb, sumIrr / max(sumW, 1e-4), blendStrength), vec3(0.0));
+    vec3 filteredSpec = max(mix(centerSpec.rgb, sumSpec / max(sumSpecW, 1e-4), blendStrength * specBlurFactor), vec3(0.0));
+    if (any(isnan(filteredIrr)) || any(isinf(filteredIrr))) filteredIrr = max(centerIrr.rgb, vec3(0.0));
+    if (any(isnan(filteredSpec)) || any(isinf(filteredSpec))) filteredSpec = max(centerSpec.rgb, vec3(0.0));
+
+    imageStore(uPtIrrHistoryOut, pix, vec4(filteredIrr, 1.0));
+    imageStore(uHdrOut, pix, vec4(filteredIrr * primaryAlbedo + filteredSpec + primaryEmissive, 1.0));
+}

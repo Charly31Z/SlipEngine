@@ -263,6 +263,9 @@ SlipPrimitiveEntity::~SlipPrimitiveEntity() {
 
 void SlipPrimitiveEntity::InitGeometry() {
     if (m_Initialized) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenVertexArrays) return;
+#endif
 
     std::vector<Vertex> vertices;
     std::vector<unsigned int> indices;

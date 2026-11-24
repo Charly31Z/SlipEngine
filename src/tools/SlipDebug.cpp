@@ -37,6 +37,9 @@ void main()
 
 static SlipShader* GetOrCreateDebugShader()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glCreateShader) return nullptr;
+#endif
 	static SlipShader* s_Shader = nullptr;
 	if (!s_Shader)
 	{
@@ -91,6 +94,12 @@ void DebugCollision::render(const glm::mat4& view, const glm::mat4& projection)
 {
 	if (lines.empty())
 		return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glGenVertexArrays) {
+		lines.clear();
+		return;
+	}
+#endif
 
 	if (!initialized)
 	{
@@ -160,6 +169,9 @@ void DebugCollision::render()
 
 void DebugCollision::clean()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (glad_glDeleteVertexArrays) {
+#endif
 	if (VAO != 0) {
 		glDeleteVertexArrays(1, &VAO);
 		VAO = 0;
@@ -168,6 +180,12 @@ void DebugCollision::clean()
 		glDeleteBuffers(1, &VBO);
 		VBO = 0;
 	}
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	} else {
+		VAO = 0;
+		VBO = 0;
+	}
+#endif
 	lines.clear();
 	initialized = false;
 }
@@ -175,6 +193,14 @@ void DebugCollision::clean()
 void DebugCollision::cleanLines()
 {
 	lines.clear();
+}
+
+void DebugCollision::ConsumePendingLines(std::vector<glm::vec3>& outLines)
+{
+	if (!lines.empty()) {
+		outLines.insert(outLines.end(), lines.begin(), lines.end());
+		lines.clear();
+	}
 }
 
 glm::vec3 SlipDebug::colorToVec3(Color color)
@@ -226,6 +252,12 @@ void SlipDebug::draw(const glm::mat4& view, const glm::mat4& projection)
 
 	if (lines.empty())
 		return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glGenVertexArrays) {
+		lines.clear();
+		return;
+	}
+#endif
 
 	if (VAO == 0)
 	{
@@ -295,6 +327,9 @@ void SlipDebug::clean()
 {
 	debuggedColl.clean();
 
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (glad_glDeleteVertexArrays) {
+#endif
 	if (VAO != 0) {
 		glDeleteVertexArrays(1, &VAO);
 		VAO = 0;
@@ -303,6 +338,12 @@ void SlipDebug::clean()
 		glDeleteBuffers(1, &VBO);
 		VBO = 0;
 	}
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	} else {
+		VAO = 0;
+		VBO = 0;
+	}
+#endif
 	lines.clear();
 }
 
@@ -310,6 +351,16 @@ void SlipDebug::cleanLines()
 {
 	lines.clear();
 	debuggedColl.cleanLines();
+}
+
+void SlipDebug::ConsumePendingLines(std::vector<glm::vec3>& outLines)
+{
+	outLines.clear();
+	debuggedColl.ConsumePendingLines(outLines);
+	if (!lines.empty()) {
+		outLines.insert(outLines.end(), lines.begin(), lines.end());
+		lines.clear();
+	}
 }
 
 SlipDebug::SlipDebug()

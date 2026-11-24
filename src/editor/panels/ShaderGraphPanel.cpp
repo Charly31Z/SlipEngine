@@ -1,10 +1,11 @@
-﻿#include "SlipEngine/editor/panels/ShaderGraphPanel.h"
+#include "SlipEngine/editor/panels/ShaderGraphPanel.h"
 #include "SlipEngine/editor/SlipEditor.h"
 #include "SlipEngine/render/shadergraph/ShaderGraphSerializer.h"
 #include "SlipEngine/render/shadergraph/ShaderGraphCompiler.h"
 #include "SlipEngine/render/shadergraph/ShaderNode.h"
 #include "SlipEngine/render/SlipShader.h"
 #include "SlipEngine/render/SlipTexture.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 #include "SlipEngine/render/SlipPrimitive.h"
 #include "SlipEngine/render/SlipMesh.h"
 #include "SlipEngine/tools/SlipFileSystem.h"
@@ -63,6 +64,10 @@ ShaderGraphPanel::ShaderGraphPanel() {
 ShaderGraphPanel::~ShaderGraphPanel() {
     if (s_Instance == this) {
         s_Instance = nullptr;
+    }
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) {
+        m_NodePreviews.clear();
+        return;
     }
     // Liberar recursos GL del preview
     if (m_SphereVAO != 0) glDeleteVertexArrays(1, &m_SphereVAO);
@@ -1244,6 +1249,7 @@ void ShaderGraphPanel::RefreshPreviewShader() {
 }
 
 void ShaderGraphPanel::EnsurePreviewResources() {
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) return;
     if (!m_SphereInitialized) {
         std::vector<Vertex> vertices;
         std::vector<unsigned int> indices;
@@ -1372,11 +1378,15 @@ void ShaderGraphPanel::RenderPreviewOverlay(const ImVec2& canvasP0, const ImVec2
     if (bodyHeight < 40.0f) bodyHeight = 40.0f;
     ImVec2 bodyMax = ImVec2(bodyMin.x + ImGui::GetContentRegionAvail().x, bodyMin.y + bodyHeight);
 
-    EnsurePreviewResources();
-
-    // Guardar cursor, renderizar (offscreen) y presentar la textura
     ImGui::GetWindowDrawList()->AddRectFilled(bodyMin, bodyMax, IM_COL32(18, 19, 24, 255));
-    RenderPreviewFrame(bodyMin, bodyMax);
+    if (SlipRHI::GetActiveAPI() == GraphicsAPI::OpenGL) {
+        EnsurePreviewResources();
+        RenderPreviewFrame(bodyMin, bodyMax);
+    } else {
+        ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, bodyHeight));
+        ImGui::GetWindowDrawList()->AddText(ImVec2(bodyMin.x + 8.0f, bodyMin.y + 8.0f),
+            IM_COL32(180, 195, 220, 255), "Preview GL en Fase 4 (Vulkan)");
+    }
 
     // --- Estado bajo el cuerpo ---
     ImGui::SetCursorScreenPos(ImVec2(bodyMin.x, bodyMax.y));
@@ -1582,6 +1592,7 @@ void ShaderGraphPanel::EnsureNodePreviewFBO(NodePreviewCache& entry) {
 }
 
 void ShaderGraphPanel::UpdateNextNodePreview() {
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) return;
     if (!m_ShowNodePreviews) return;
 
     // Buscar un nodo con version desactualizada (el seleccionado tiene prioridad)
@@ -1652,6 +1663,7 @@ void ShaderGraphPanel::UpdateNextNodePreview() {
 }
 
 void ShaderGraphPanel::RenderNodePreviews() {
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) return;
     if (!m_ShowNodePreviews || m_NodePreviews.empty()) return;
     EnsurePreviewResources();
     if (m_SphereIndexCount == 0) return;

@@ -2,6 +2,7 @@
 
 #include "SlipEngine/core/SlipExport.h"
 #include "SlipEngine/editor/EditorPanel.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 #include <cstdint>
 #include <vector>
 #include <memory>
@@ -41,7 +42,7 @@ public:
     ~SlipEditor();
 
     bool Init(SlipWindow& window);
-    bool Init(SDL_Window* window, SDL_GLContext glContext);
+    bool Init(SDL_Window* window, SDL_GLContext glContext, GraphicsAPI api = GraphicsAPI::OpenGL);
     void ProcessEvent(const SDL_Event& event);
     void BeginFrame();
     void RenderPanels();
@@ -140,6 +141,7 @@ private:
 
     SDL_Window* m_Window = nullptr;
     SDL_GLContext m_GLContext = nullptr;
+    GraphicsAPI m_GraphicsAPI = GraphicsAPI::OpenGL;
     std::vector<std::unique_ptr<EditorPanel>> m_Panels;
     SlipEntity* m_SelectedEntity = nullptr;
     std::vector<SlipEntity*> m_Selection;

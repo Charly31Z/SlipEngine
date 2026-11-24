@@ -55,6 +55,9 @@ void SlipSkyComponent::OnUpdate(float deltaTime)
 // ============================================================================
 void SlipSkyComponent::EnsureDefaultTextures()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenTextures) return;
+#endif
     if (m_DefaultNoiseTex == 0 || m_DefaultBlueNoiseTex == 0) {
         GenerateDefaultTextures();
     }
@@ -62,6 +65,13 @@ void SlipSkyComponent::EnsureDefaultTextures()
 
 void SlipSkyComponent::ReleaseDefaultTextures()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glDeleteTextures) {
+        m_DefaultNoiseTex = 0;
+        m_DefaultBlueNoiseTex = 0;
+        return;
+    }
+#endif
     if (m_DefaultNoiseTex != 0) {
         glDeleteTextures(1, &m_DefaultNoiseTex);
         m_DefaultNoiseTex = 0;
@@ -74,6 +84,9 @@ void SlipSkyComponent::ReleaseDefaultTextures()
 
 void SlipSkyComponent::GenerateDefaultTextures()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenTextures) return;
+#endif
     // 1. Textura 2D Perlin-Worley tileable de 512x512 para morfología y desperfectos de nubes
     const int noiseSize = 512;
     std::vector<unsigned char> noiseData(noiseSize * noiseSize * 4);
@@ -300,6 +313,9 @@ void SlipSkyComponent::UpdateAtmosphereFromSun()
 // ============================================================================
 void SlipSkyComponent::BindParameters(SlipShader* shader, float currentTime)
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glActiveTexture || !glad_glBindTexture) return;
+#endif
     if (!shader) return;
 
     if (params.dynamicAtmosphere) {

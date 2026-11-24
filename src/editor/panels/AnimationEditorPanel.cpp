@@ -4,6 +4,7 @@
 #include "SlipEngine/editor/SlipModelExtract.h"
 #include "SlipEngine/render/SlipShaderLibrary.h"
 #include "SlipEngine/render/SlipGraphicsSettings.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 #include "SlipEngine/scene/SlipLevel.h"
 #include "SlipEngine/tools/SlipFileSystem.h"
 #include "SlipEngine/core/SlipConsole.h"
@@ -34,6 +35,9 @@ AnimationEditorPanel::AnimationEditorPanel() {
 AnimationEditorPanel::~AnimationEditorPanel() {
     if (s_Instance == this) {
         s_Instance = nullptr;
+    }
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) {
+        return;
     }
     if (m_DepthRBO != 0) {
         glDeleteRenderbuffers(1, &m_DepthRBO);
@@ -885,6 +889,10 @@ void AnimationEditorPanel::RenderSkeletalPreview() {
 }
 
 void AnimationEditorPanel::RenderViewport() {
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) {
+        ImGui::TextDisabled("Preview esqueletico 3D disponible en modo OpenGL (migracion Vulkan en Fase 4).");
+        return;
+    }
     ImVec2 viewSize = ImGui::GetContentRegionAvail();
     int newW = (std::max)(64, (int)viewSize.x);
     int newH = (std::max)(64, (int)viewSize.y);

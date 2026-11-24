@@ -1,0 +1,140 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uRtgiIn;
+layout(set = 0, binding = 1) uniform sampler2D uRtReflIn;
+layout(set = 0, binding = 2) uniform sampler2D uNormalRough;
+layout(set = 0, binding = 3) uniform sampler2D uDepth;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D uRtgiOut;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D uRtReflOut;
+
+layout(set = 0, binding = 6) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+} uGi;
+
+layout(push_constant) uniform AtrousPC {
+    int stepSize;
+} pc;
+
+float Luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uRtgiOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    float depth = texelFetch(uDepth, pix, 0).r;
+    if (depth >= 0.99999 || uGi.hasValidTLAS == 0) {
+        imageStore(uRtgiOut, pix, vec4(0.0, 0.0, 0.0, 1.0));
+        imageStore(uRtReflOut, pix, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    vec4 centerGi = texelFetch(uRtgiIn, pix, 0);
+    vec4 centerRefl = texelFetch(uRtReflIn, pix, 0);
+    if (any(isnan(centerGi)) || any(isinf(centerGi))) centerGi = vec4(0.0, 0.0, 0.0, 1.0);
+    if (any(isnan(centerRefl)) || any(isinf(centerRefl))) centerRefl = vec4(0.0, 0.0, 0.0, 1.0);
+
+    if (uGi.giDenoiserEnabled == 0 || pc.stepSize <= 0) {
+        imageStore(uRtgiOut, pix, centerGi);
+        imageStore(uRtReflOut, pix, centerRefl);
+        return;
+    }
+
+    vec4 centerNR = texelFetch(uNormalRough, pix, 0);
+    vec3 centerN = normalize(centerNR.xyz);
+    float centerRough = clamp(centerNR.w, 0.04, 1.0);
+    float centerLogD = log(max(1.0 - depth, 1e-5));
+
+    float centerGiLuma = Luminance(centerGi.rgb);
+    float centerShadow = centerGi.a;
+    float centerReflLuma = Luminance(centerRefl.rgb);
+
+    // Mirror/very smooth metals keep crisp reflections; glossy/rough surfaces denoise smoothly
+    float reflBlurFactor = smoothstep(0.07, 0.32, centerRough);
+    float phiGi = 1.65;
+    float phiShadow = 0.65;
+    float phiRefl = mix(0.35, 2.2, centerRough);
+
+    const float kWeights[3] = float[3](0.375, 0.25, 0.0625);
+
+    vec3 giSum = centerGi.rgb * 0.140625;
+    float giWSum = 0.140625;
+
+    float shSum = centerShadow * 0.140625;
+    float shWSum = 0.140625;
+
+    vec3 reflSum = centerRefl.rgb * 0.140625;
+    float reflWSum = 0.140625;
+
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 q = pix + ivec2(dx, dy) * pc.stepSize;
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+
+            float qDepth = texelFetch(uDepth, q, 0).r;
+            if (qDepth >= 0.99999) continue;
+
+            vec4 qNR = texelFetch(uNormalRough, q, 0);
+            vec3 qN = normalize(qNR.xyz);
+            float qLogD = log(max(1.0 - qDepth, 1e-5));
+
+            float nW = pow(max(dot(centerN, qN), 0.0), 32.0);
+            float dRel = abs(centerLogD - qLogD);
+            float dW = exp(-dRel * dRel * 18.0);
+            float kernelW = kWeights[abs(dx)] * kWeights[abs(dy)];
+            float baseW = kernelW * nW * dW;
+            if (baseW <= 1e-5) continue;
+
+            vec4 qGi = texelFetch(uRtgiIn, q, 0);
+            if (!any(isnan(qGi)) && !any(isinf(qGi))) {
+                float gDiff = abs(centerGiLuma - Luminance(qGi.rgb)) / phiGi;
+                float gW = baseW * exp(-gDiff * gDiff * 0.5);
+                giSum += qGi.rgb * gW;
+                giWSum += gW;
+
+                float sDiff = abs(centerShadow - qGi.a) / phiShadow;
+                float sW = baseW * exp(-sDiff * sDiff * 0.5);
+                shSum += qGi.a * sW;
+                shWSum += sW;
+            }
+
+            if (reflBlurFactor > 0.01) {
+                vec4 qRefl = texelFetch(uRtReflIn, q, 0);
+                if (!any(isnan(qRefl)) && !any(isinf(qRefl))) {
+                    float rDiff = abs(centerReflLuma - Luminance(qRefl.rgb)) / phiRefl;
+                    float roughMatch = exp(-abs(centerRough - clamp(qNR.w, 0.04, 1.0)) * 8.0);
+                    float rW = baseW * roughMatch * exp(-rDiff * rDiff * 0.5);
+                    reflSum += qRefl.rgb * rW;
+                    reflWSum += rW;
+                }
+            }
+        }
+    }
+
+    vec3 outGi = max(giSum / max(giWSum, 1e-4), vec3(0.0));
+    float outShadow = clamp(shSum / max(shWSum, 1e-4), 0.0, 1.0);
+    vec3 outReflBlurred = max(reflSum / max(reflWSum, 1e-4), vec3(0.0));
+    vec3 outRefl = mix(centerRefl.rgb, outReflBlurred, reflBlurFactor);
+
+    imageStore(uRtgiOut, pix, vec4(outGi, outShadow));
+    imageStore(uRtReflOut, pix, vec4(outRefl, 1.0));
+}

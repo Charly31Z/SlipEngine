@@ -197,6 +197,9 @@ bool SlipLightBaker::BakeLevel(
     std::function<void(float progress, const std::string& status)> progressCb
 ) {
     if (!level) return false;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenFramebuffers || !glad_glGenTextures) return false;
+#endif
 
     m_IsBaking = true;
     m_Progress = 0.05f;
@@ -453,6 +456,9 @@ bool SlipLightBaker::BakeLevel(
 
 bool SlipLightBaker::LoadBakedLightmap(SlipLevel* level) {
     if (!level || level->lightmapPath.empty()) return false;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenTextures) return false;
+#endif
 
     if (!SlipFileSystem::Exists(level->lightmapPath)) {
         return false;
@@ -487,6 +493,9 @@ bool SlipLightBaker::LoadBakedLightmap(SlipLevel* level) {
 void SlipLightBaker::ClearBakedLightmap(SlipLevel* level) {
     if (!level) return;
     if (level->lightmapTexture != 0) {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+        if (glad_glDeleteTextures)
+#endif
         glDeleteTextures(1, &level->lightmapTexture);
         level->lightmapTexture = 0;
     }

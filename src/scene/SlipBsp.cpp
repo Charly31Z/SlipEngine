@@ -178,6 +178,9 @@ SlipBsp::SlipBsp(std::string path) : path(path)
 
 void SlipBsp::init(SlipMesh& skymesh)
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenVertexArrays) return;
+#endif
     // create buffers/arrays
     glGenVertexArrays(1, &mesh.VAO);
     glGenBuffers(1, &mesh.VBO);
@@ -236,6 +239,10 @@ void SlipBsp::init(SlipMesh& skymesh)
 
 int SlipBsp::draw()
 {
+    if (!initialized) return 0;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glBindVertexArray) return 0;
+#endif
     if (SlipShadows::Get().calculating())
     {
         glDisable(GL_CULL_FACE);
@@ -291,10 +298,15 @@ void SlipBsp::clean()
 {
     if (skybox != nullptr)
         skybox->clean();
-
-    glDeleteVertexArrays(1, &mesh.VAO);
-    glDeleteBuffers(1, &mesh.VBO);
-    glDeleteBuffers(1, &mesh.EBO);
-
-    shader->destroy();
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (glad_glDeleteVertexArrays) {
+#endif
+    if (mesh.VAO != 0) glDeleteVertexArrays(1, &mesh.VAO);
+    if (mesh.VBO != 0) glDeleteBuffers(1, &mesh.VBO);
+    if (mesh.EBO != 0) glDeleteBuffers(1, &mesh.EBO);
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    }
+#endif
+    mesh.VAO = mesh.VBO = mesh.EBO = 0;
+    if (shader) shader->destroy();
 }

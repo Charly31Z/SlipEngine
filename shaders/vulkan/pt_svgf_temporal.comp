@@ -1,0 +1,236 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uCurrRawIrr;       // m_PtAccum (DiffuseIrradiance demodulated)
+layout(set = 0, binding = 1) uniform sampler2D uCurrNormalRough;  // m_PtNormalRough[curr] (.xyz=normal, .w=roughness)
+layout(set = 0, binding = 2) uniform sampler2D uCurrDepthInst;    // m_PtDepthInst[curr] (.r=linearDepth, .g=instId)
+layout(set = 0, binding = 3) uniform sampler2D uMotionTex;        // m_PtMotion (.rg = currUv - prevUv)
+layout(set = 0, binding = 4) uniform sampler2D uPrevIrrHistory;   // m_PtIrradianceHistory[prev] (.rgb=diffIrr, .a=diffVar)
+layout(set = 0, binding = 5) uniform sampler2D uPrevMoments;      // m_PtMomentsHistory[prev] (.r=mu1, .g=mu2, .b=histLen, .a=specMu1)
+layout(set = 0, binding = 6) uniform sampler2D uPrevNormalRough;  // m_PtNormalRough[prev]
+layout(set = 0, binding = 7) uniform sampler2D uPrevDepthInst;    // m_PtDepthInst[prev]
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D uCurrIrrHistoryOut;
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D uCurrMomentsOut;
+layout(set = 0, binding = 10) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+} uGi;
+layout(set = 0, binding = 11) uniform sampler2D uCurrRawSpec;     // m_PtSpecAccum (SpecularRadiance unmodulated)
+layout(set = 0, binding = 12) uniform sampler2D uPrevSpecHistory; // m_PtSpecularHistory[prev] (.rgb=specRad, .a=specVar)
+layout(set = 0, binding = 13, rgba16f) uniform writeonly image2D uCurrSpecHistoryOut;
+
+float Luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uCurrIrrHistoryOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    vec3 currIrr = max(texelFetch(uCurrRawIrr, pix, 0).rgb, vec3(0.0));
+    if (any(isnan(currIrr)) || any(isinf(currIrr))) currIrr = vec3(0.0);
+
+    vec3 currSpec = max(texelFetch(uCurrRawSpec, pix, 0).rgb, vec3(0.0));
+    if (any(isnan(currSpec)) || any(isinf(currSpec))) currSpec = vec3(0.0);
+
+    vec2 currDI = texelFetch(uCurrDepthInst, pix, 0).rg;
+    float currDepth = currDI.x;
+    float currInst  = currDI.y;
+
+    // Sky pixel: no geometry history
+    if (currDepth <= 0.0001) {
+        imageStore(uCurrIrrHistoryOut, pix, vec4(currIrr, 0.0));
+        imageStore(uCurrSpecHistoryOut, pix, vec4(currSpec, 0.0));
+        imageStore(uCurrMomentsOut, pix, vec4(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    vec4 currNR = texelFetch(uCurrNormalRough, pix, 0);
+    vec3 currN = normalize(currNR.xyz);
+    float currRough = clamp(currNR.w, 0.04, 1.0);
+
+    float currLuma = Luminance(currIrr);
+    vec2 currMom = vec2(currLuma, currLuma * currLuma);
+    float currSpecLuma = Luminance(currSpec);
+
+    // Local screen-space depth gradient for grazing-angle disocclusion tolerance
+    float dRight = texelFetch(uCurrDepthInst, min(pix + ivec2(1, 0), size - ivec2(1)), 0).r;
+    float dUp    = texelFetch(uCurrDepthInst, min(pix + ivec2(0, 1), size - ivec2(1)), 0).r;
+    vec2 depthGrad = vec2(abs(dRight - currDepth), abs(dUp - currDepth));
+    float gradMag = length(depthGrad);
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    vec2 motion = texelFetch(uMotionTex, pix, 0).rg;
+    if (any(isnan(motion)) || any(isinf(motion))) motion = vec2(0.0);
+    vec2 prevUv = uv - motion;
+
+    vec3 prevIrrSum = vec3(0.0);
+    vec3 prevSpecSum = vec3(0.0);
+    float prevSpecVarSum = 0.0;
+    vec2 prevMomSum = vec2(0.0);
+    float prevHistSum = 0.0;
+    float prevSpecMu1Sum = 0.0;
+    float wSum = 0.0;
+    float wSpecSum = 0.0;
+
+    if (uGi.frameIndex > 1u &&
+        prevUv.x >= 0.0 && prevUv.x <= 1.0 &&
+        prevUv.y >= 0.0 && prevUv.y <= 1.0)
+    {
+        vec2 prevPixF = prevUv * vec2(size) - 0.5;
+        ivec2 baseP = ivec2(floor(prevPixF));
+        vec2 f = fract(prevPixF);
+
+        float bw[4] = float[4](
+            (1.0 - f.x) * (1.0 - f.y),
+            f.x * (1.0 - f.y),
+            (1.0 - f.x) * f.y,
+            f.x * f.y
+        );
+        ivec2 offsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
+
+        for (int i = 0; i < 4; ++i) {
+            ivec2 q = baseP + offsets[i];
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+
+            vec2 qDI = texelFetch(uPrevDepthInst, q, 0).rg;
+            float qDepth = qDI.x;
+            float qInst  = qDI.y;
+            if (qDepth <= 0.0001) continue;
+
+            // 1. Instance ID consistency check
+            if (abs(currInst - qInst) > 0.5) continue;
+
+            // 2. Normal consistency check
+            vec4 qNR = texelFetch(uPrevNormalRough, q, 0);
+            vec3 qN = normalize(qNR.xyz);
+            float nDot = dot(currN, qN);
+            if (nDot < 0.90) continue;
+
+            // 3. Linear depth consistency check
+            float depthTol = max(0.07 * currDepth, 2.2 * gradMag + 0.015);
+            if (abs(currDepth - qDepth) > depthTol) continue;
+
+            vec4 qHist = texelFetch(uPrevIrrHistory, q, 0);
+            vec4 qMom  = texelFetch(uPrevMoments, q, 0);
+            if (qMom.z < 0.5 || any(isnan(qHist)) || any(isinf(qHist))) continue;
+
+            float w = bw[i];
+            prevIrrSum  += max(qHist.rgb, vec3(0.0)) * w;
+            prevMomSum  += max(qMom.xy, vec2(0.0)) * w;
+            prevHistSum += qMom.z * w;
+            wSum += w;
+
+            // Specular consistency check (stricter normal + roughness compatibility)
+            float qRough = clamp(qNR.w, 0.04, 1.0);
+            float minSpecNormalDot = mix(0.985, 0.92, smoothstep(0.05, 0.45, currRough));
+            if (nDot >= minSpecNormalDot && abs(currRough - qRough) < 0.15) {
+                vec4 qSpecHist = texelFetch(uPrevSpecHistory, q, 0);
+                if (!any(isnan(qSpecHist)) && !any(isinf(qSpecHist))) {
+                    prevSpecSum    += max(qSpecHist.rgb, vec3(0.0)) * w;
+                    prevSpecVarSum += max(qSpecHist.a, 0.0) * w;
+                    prevSpecMu1Sum += max(qMom.w, 0.0) * w;
+                    wSpecSum += w;
+                }
+            }
+        }
+    }
+
+    vec3 outIrr = currIrr;
+    vec2 outMoments = currMom;
+    float outHistLen = 1.0;
+
+    if (wSum > 0.01) {
+        vec3 histIrr = prevIrrSum / wSum;
+        vec2 histMom = prevMomSum / wSum;
+        float histLen = min((prevHistSum / wSum) + 1.0, 32.0);
+
+        // 3x3 neighborhood clamping for diffuse irradiance
+        vec3 m1 = vec3(0.0);
+        vec3 m2 = vec3(0.0);
+        float nCnt = 0.0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 np = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
+                vec3 c = max(texelFetch(uCurrRawIrr, np, 0).rgb, vec3(0.0));
+                if (any(isnan(c)) || any(isinf(c))) continue;
+                m1 += c;
+                m2 += c * c;
+                nCnt += 1.0;
+            }
+        }
+        m1 /= max(nCnt, 1.0);
+        vec3 sigma = sqrt(max(m2 / max(nCnt, 1.0) - m1 * m1, vec3(0.0)));
+        histIrr = clamp(histIrr, max(m1 - sigma * 3.5, vec3(0.0)), m1 + sigma * 3.5 + vec3(0.20));
+
+        float minAlpha = clamp(uGi.giTemporalAlpha, 0.04, 0.50);
+        float alphaIrr = max(minAlpha, 1.0 / histLen);
+        float alphaMom = max(0.20, 1.0 / histLen);
+
+        outIrr     = mix(histIrr, currIrr, alphaIrr);
+        outMoments = mix(histMom, currMom, alphaMom);
+        outHistLen = histLen;
+    }
+
+    vec3 outSpec = currSpec;
+    float outSpecMu1 = currSpecLuma;
+    float outSpecVar = currSpecLuma * currSpecLuma * 0.25;
+
+    if (wSpecSum > 0.01) {
+        vec3 histSpec = prevSpecSum / wSpecSum;
+        float histSpecVar = prevSpecVarSum / wSpecSum;
+        float histSpecMu1 = prevSpecMu1Sum / wSpecSum;
+
+        // 3x3 neighborhood clamping for specular radiance (wider tolerance on glossy/rough, tight responsive alpha on mirror)
+        vec3 sm1 = vec3(0.0);
+        vec3 sm2 = vec3(0.0);
+        float sCnt = 0.0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 np = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
+                vec3 c = max(texelFetch(uCurrRawSpec, np, 0).rgb, vec3(0.0));
+                if (any(isnan(c)) || any(isinf(c))) continue;
+                sm1 += c;
+                sm2 += c * c;
+                sCnt += 1.0;
+            }
+        }
+        sm1 /= max(sCnt, 1.0);
+        vec3 sSigma = sqrt(max(sm2 / max(sCnt, 1.0) - sm1 * sm1, vec3(0.0)));
+        float clampK = mix(2.2, 3.8, smoothstep(0.08, 0.45, currRough));
+        histSpec = clamp(histSpec, max(sm1 - sSigma * clampK, vec3(0.0)), sm1 + sSigma * clampK + vec3(0.25));
+
+        // Mirror surfaces (low roughness) use responsive temporal blend under camera motion to avoid parallax ghosting
+        float motionLen = length(motion * vec2(size));
+        float baseSpecAlpha = clamp(uGi.giTemporalAlpha, 0.04, 0.50);
+        float mirrorBoost = (1.0 - smoothstep(0.04, 0.22, currRough)) * clamp(motionLen * 0.15, 0.0, 0.45);
+        float alphaSpec = clamp(max(baseSpecAlpha + mirrorBoost, 1.0 / max(outHistLen, 1.0)), 0.05, 0.65);
+
+        outSpec    = mix(histSpec, currSpec, alphaSpec);
+        outSpecMu1 = mix(histSpecMu1, currSpecLuma, max(0.20, alphaSpec));
+        float specDiff = currSpecLuma - outSpecMu1;
+        outSpecVar = max(0.0, mix(histSpecVar, specDiff * specDiff, max(0.20, alphaSpec)));
+    }
+
+    // Temporal variance estimate for diffuse: Var(L) = E[L^2] - E[L]^2
+    float temporalVariance = max(0.0, outMoments.y - outMoments.x * outMoments.x);
+
+    imageStore(uCurrIrrHistoryOut, pix, vec4(outIrr, temporalVariance));
+    imageStore(uCurrSpecHistoryOut, pix, vec4(outSpec, outSpecVar));
+    imageStore(uCurrMomentsOut, pix, vec4(outMoments.x, outMoments.y, outHistLen, outSpecMu1));
+}

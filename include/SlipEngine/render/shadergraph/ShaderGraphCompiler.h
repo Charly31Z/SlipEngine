@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #ifndef SLIP_SHADER_GRAPH_COMPILER_H
 #define SLIP_SHADER_GRAPH_COMPILER_H
@@ -7,6 +7,7 @@
 #include "ShaderGraphTypes.h"
 #include "ShaderGraph.h"
 #include "ShaderNode.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -21,7 +22,8 @@ namespace SlipShaderGraph {
 
     enum class GLSLTargetVersion {
         Desktop_GL330_Core,  // OpenGL 3.3 Core (Windows/Linux/macOS)
-        Mobile_GLES300_ES    // OpenGL ES 3.0 (Android / iOS)
+        Mobile_GLES300_ES,   // OpenGL ES 3.0 (Android / iOS)
+        Vulkan_GLSL460       // Vulkan 1.3 SPIR-V 1.6 (Desktop Vulkan)
     };
 
     struct SLIPENGINE_API ShaderCompilerOptions {
@@ -47,6 +49,8 @@ namespace SlipShaderGraph {
     struct SLIPENGINE_API GeneratedShaderCode {
         std::string vertexSource;
         std::string fragmentSource;
+        std::vector<uint32_t> vertexSpirv;
+        std::vector<uint32_t> fragmentSpirv;
         bool success = false;
         std::string errorMessage;
         std::vector<CompiledTextureBinding> textureBindings;
@@ -60,6 +64,14 @@ namespace SlipShaderGraph {
         static GeneratedShaderCode Compile(
             const ShaderGraph& graph,
             const ShaderCompilerOptions& options = ShaderCompilerOptions()
+        );
+
+        // Compiles a ShaderGraph to Vulkan GLSL 460 + SPIR-V 1.6 bytecode
+        static GeneratedShaderCode CompileToVulkanSpirv(
+            const ShaderGraph& graph,
+            const ShaderCompilerOptions& options = ShaderCompilerOptions(),
+            bool enableCache = true,
+            const std::string& cacheDir = "cache/spirv"
         );
 
         // Compiles a preview shader that evaluates the given node's output port
@@ -119,7 +131,11 @@ namespace SlipShaderGraph {
         static void AppendGLSLVersionHeader(std::ostringstream& ss, GLSLTargetVersion target);
         static void AppendProceduralMathLibrary(std::ostringstream& ss);
         static void AppendPBRFunctions(std::ostringstream& ss, const ShaderCompilerOptions& options);
-        static void AppendLightingStructsAndUniforms(std::ostringstream& ss, const ShaderCompilerOptions& options);
+        static void AppendLightingStructsAndUniforms(
+            std::ostringstream& ss,
+            const ShaderCompilerOptions& options,
+            int startVulkanSamplerBinding = 1
+        );
     };
 
 } // namespace SlipShaderGraph

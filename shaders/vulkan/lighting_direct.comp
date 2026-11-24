@@ -1,0 +1,391 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct GpuDirLight {
+    vec4 directionIntensity; // xyz=dir, w=intensity
+    vec4 colorPad;           // rgb=color
+};
+
+struct GpuPointLight {
+    vec4 positionRange;      // xyz=pos, w=range
+    vec4 colorIntensity;     // rgb=color, w=intensity
+};
+
+struct GpuSpotLight {
+    vec4 positionRange;      // xyz=pos, w=range
+    vec4 directionCosOuter;  // xyz=dir, w=cos(outerAngle)
+    vec4 colorIntensityCosIn;// rgb=color, w=intensity
+};
+
+layout(set = 0, binding = 0) uniform sampler2D uAlbedoTex;
+layout(set = 0, binding = 1) uniform sampler2D uNormalRoughTex;
+layout(set = 0, binding = 2) uniform sampler2D uMetalEmissiveTex;
+layout(set = 0, binding = 3) uniform sampler2D uDepthTex;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D uHdrOut;
+
+layout(set = 0, binding = 5) uniform SceneLightingUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 skyZenith;          // rgb, w=skyEnabled
+    vec4 skyHorizon;         // rgb, w=horizonSharpness
+    vec4 skyGround;          // rgb, w=sunDiscEnabled
+    vec4 sunDirIntensity;    // xyz=toSun, w=sunIntensity
+    vec4 sunColorParams;     // rgb=sunColor, w=sunSize
+    ivec4 counts;            // x=dirCount, y=pointCount, z=spotCount, w=sunGlow*1000
+    GpuDirLight dirLights[4];
+    GpuPointLight pointLights[32];
+    GpuSpotLight spotLights[16];
+    vec4 cloudParams0;       // x=enabled, y=coverage, z=density, w=baseHeight
+    vec4 cloudParams1;       // x=layerThickness, y=scale, z=edgeErosion, w=absorption
+    vec4 cloudParams2;       // xy=windOffset, z=henyeyG, w=powderFactor
+    vec4 cloudAmbient;       // rgb=cloudAmbientColor, w=silverSpread
+} uScene;
+
+layout(set = 0, binding = 6) uniform sampler2D uRtgiTex;
+
+layout(set = 0, binding = 7) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+} uGi;
+
+layout(set = 0, binding = 8) uniform sampler2D uRtReflTex;
+
+const float PI = 3.14159265359;
+
+vec3 ReconstructWorldPos(vec2 uv, float depth) {
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec4 clip = vec4(ndc, depth, 1.0);
+    vec4 world = uScene.invViewProj * clip;
+    return world.xyz / max(abs(world.w), 1e-6);
+}
+
+float CloudHash31(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float CloudNoise3D(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float n000 = CloudHash31(i);
+    float n100 = CloudHash31(i + vec3(1.0, 0.0, 0.0));
+    float n010 = CloudHash31(i + vec3(0.0, 1.0, 0.0));
+    float n110 = CloudHash31(i + vec3(1.0, 1.0, 0.0));
+    float n001 = CloudHash31(i + vec3(0.0, 0.0, 1.0));
+    float n101 = CloudHash31(i + vec3(1.0, 0.0, 1.0));
+    float n011 = CloudHash31(i + vec3(0.0, 1.0, 1.0));
+    float n111 = CloudHash31(i + vec3(1.0, 1.0, 1.0));
+
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+}
+
+float CloudFbm3D(vec3 p) {
+    float v = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 4; ++i) {
+        v += amp * CloudNoise3D(p);
+        p = vec3(
+            0.80 * p.x - 0.60 * p.z,
+            1.15 * p.y + 0.27 * p.x,
+            0.60 * p.x + 0.80 * p.z
+        ) * 2.03 + vec3(13.7, 7.3, 19.1);
+        amp *= 0.5;
+    }
+    return v;
+}
+
+float SampleCloudDensity(vec3 pos, float baseH, float thick, float scale, float coverage, float density, float edgeErosion, vec2 windOff) {
+    float hFrac = clamp((pos.y - baseH) / thick, 0.0, 1.0);
+    float hEnv = smoothstep(0.0, 0.16, hFrac) * smoothstep(1.0, 0.34, hFrac);
+    if (hEnv <= 0.001) return 0.0;
+
+    float freq = scale * 6.0;
+    vec3 wind3 = vec3(windOff.x, 0.0, windOff.y) * 6.0;
+    vec3 p = vec3(pos.x * freq, hFrac * 1.85, pos.z * freq) + wind3;
+
+    // 2-stage domain warp + non-commensurate macro weather bank to eliminate repetition
+    vec3 warp = vec3(
+        CloudNoise3D(p * 0.43 + vec3(1.7, 9.2, 4.1)),
+        CloudNoise3D(p * 0.39 + vec3(8.3, 2.8, 5.7)),
+        CloudNoise3D(p * 0.47 + vec3(3.1, 6.4, 9.5))
+    ) - 0.5;
+    vec3 q = p + warp * 1.65;
+
+    float fbmMain = CloudFbm3D(q);
+    float billow = 1.0 - abs(CloudNoise3D(q * 1.73 + vec3(5.2, 1.3, 8.8)) * 2.0 - 1.0);
+    float macroBank = CloudNoise3D(vec3(pos.x * freq * 0.23, 0.37, pos.z * freq * 0.29) + wind3 * 0.35);
+
+    float localCov = clamp(coverage + (macroBank - 0.5) * 0.42, 0.02, 0.98);
+    float baseN = mix(fbmMain, billow, 0.30);
+    float threshold = 1.0 - localCov;
+    float baseCloud = clamp((baseN - threshold) / max(1.0 - threshold, 0.02), 0.0, 1.0);
+    if (baseCloud <= 0.0005) return 0.0;
+
+    float detailN = CloudFbm3D(q * 3.4 - wind3 * 0.7);
+    float eroded = clamp((baseCloud - detailN * edgeErosion * 0.55) / max(1.0 - detailN * edgeErosion * 0.55, 0.05), 0.0, 1.0);
+    float crisp = pow(eroded, mix(1.0, 1.4, edgeErosion));
+    return crisp * hEnv * (density * 8.5);
+}
+
+vec3 EvaluateVolumetricClouds(vec3 ro, vec3 rd, vec3 skyCol, ivec2 pix) {
+    if (uScene.cloudParams0.x < 0.5 || rd.y <= 0.012) {
+        return skyCol;
+    }
+
+    float coverage = clamp(uScene.cloudParams0.y, 0.0, 1.0);
+    float density = max(uScene.cloudParams0.z, 0.0);
+    if (coverage <= 0.01 || density <= 0.00005) return skyCol;
+
+    float baseH = uScene.cloudParams0.w;
+    float thick = max(uScene.cloudParams1.x, 5.0);
+    float topH = baseH + thick;
+    float tStart = max((baseH - ro.y) / rd.y, 0.0);
+    float tEnd = max((topH - ro.y) / rd.y, tStart);
+    tEnd = min(tEnd, tStart + 7500.0);
+    tEnd = min(tEnd, 18000.0);
+    if (tEnd <= tStart + 0.1) return skyCol;
+
+    float scale = max(uScene.cloudParams1.y, 0.00005);
+    float edgeErosion = clamp(uScene.cloudParams1.z, 0.0, 1.0);
+    float absorption = max(uScene.cloudParams1.w, 0.05);
+    vec2 windOff = uScene.cloudParams2.xy;
+    float g = clamp(uScene.cloudParams2.z, -0.85, 0.85);
+    float powderFactor = max(uScene.cloudParams2.w, 0.1);
+    float silverSpread = max(uScene.cloudAmbient.w, 0.1);
+
+    vec3 sunDir = normalize(uScene.sunDirIntensity.xyz);
+    float cosTheta = dot(rd, sunDir);
+    float hg = (1.0 - g * g) / (4.0 * PI * pow(max(1.0 + g * g - 2.0 * g * cosTheta, 0.02), 1.5));
+    float phase = mix(0.35, hg * 2.1, 0.55);
+    float silver = pow(max(cosTheta, 0.0), 8.0 * silverSpread) * 0.45;
+
+    // Interleaved Gradient Noise jitter eliminates visible horizontal cloud slices
+    float ign = fract(52.9829189 * fract(dot(vec2(pix), vec2(0.06711056, 0.00583715))));
+
+    const int STEPS = 32;
+    float dt = (tEnd - tStart) / float(STEPS);
+    vec3 accumCol = vec3(0.0);
+    float transmittance = 1.0;
+
+    for (int i = 0; i < STEPS; ++i) {
+        float t = tStart + (float(i) + ign) * dt;
+        vec3 pos = ro + rd * t;
+        float d = SampleCloudDensity(pos, baseH, thick, scale, coverage, density, edgeErosion, windOff);
+        if (d > 0.00005) {
+            float hFrac = clamp((pos.y - baseH) / thick, 0.0, 1.0);
+            float sunStep = clamp(thick * 0.12, 12.0, 90.0);
+            float dSun1 = SampleCloudDensity(pos + sunDir * sunStep, baseH, thick, scale, coverage, density, edgeErosion, windOff);
+            float dSun2 = SampleCloudDensity(pos + sunDir * (sunStep * 2.6), baseH, thick, scale, coverage, density, edgeErosion, windOff);
+            float sunTau = (dSun1 + dSun2) * sunStep * absorption;
+            // Dual-lobe multi-scattering approximation prevents flat dark slabs
+            float sunLight = max(exp(-sunTau * 1.1), 0.28 * exp(-sunTau * 0.25));
+
+            float powder = 1.0 - exp(-d * dt * 1.8 * powderFactor);
+            vec3 scatter = uScene.cloudAmbient.rgb * mix(0.68, 1.22, hFrac) +
+                           uScene.sunColorParams.rgb * uScene.sunDirIntensity.w * sunLight * (phase + silver) * (0.72 + 0.50 * powder);
+
+            float stepT = exp(-d * dt * absorption);
+            accumCol += transmittance * scatter * (1.0 - stepT);
+            transmittance *= stepT;
+            if (transmittance < 0.01) break;
+        }
+    }
+
+    float horizonFade = smoothstep(0.012, 0.085, rd.y) * exp(-tStart * 0.00004);
+    vec3 cloudMixed = accumCol + skyCol * transmittance;
+    return mix(skyCol, cloudMixed, horizonFade);
+}
+
+vec3 EvaluateSky(vec3 dir, bool includeSunDisc) {
+    if (uScene.skyZenith.w < 0.5) {
+        return vec3(0.08, 0.10, 0.14);
+    }
+    float y = dir.y;
+    vec3 col;
+    if (y >= 0.0) {
+        float t = pow(clamp(1.0 - y, 0.0, 1.0), max(uScene.skyHorizon.w, 0.1));
+        col = mix(uScene.skyZenith.rgb, uScene.skyHorizon.rgb, t);
+    } else {
+        float t = pow(clamp(1.0 + y, 0.0, 1.0), max(uScene.skyHorizon.w, 0.1));
+        col = mix(uScene.skyGround.rgb, uScene.skyHorizon.rgb, t);
+    }
+
+    if (includeSunDisc && uScene.skyGround.w > 0.5) {
+        vec3 sunDir = normalize(uScene.sunDirIntensity.xyz);
+        float cosTheta = max(dot(normalize(dir), sunDir), 0.0);
+        float sunRadius = max(uScene.sunColorParams.w, 0.005);
+        float disc = smoothstep(cos(sunRadius), cos(sunRadius * 0.5), cosTheta);
+        float glowSize = float(uScene.counts.w) * 0.001;
+        float glow = pow(cosTheta, mix(128.0, 8.0, clamp(glowSize, 0.0, 1.0))) * 0.45;
+        col += uScene.sunColorParams.rgb * uScene.sunDirIntensity.w * (disc * 3.0 + glow);
+    }
+    return col;
+}
+
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float denom = (NdotH * NdotH * (a2 - 1.0) + 1.0);
+    return a2 / max(PI * denom * denom, 1e-5);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotV / max(NdotV * (1.0 - k) + k, 1e-5);
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    return GeometrySchlickGGX(max(dot(N, V), 0.0), roughness) *
+           GeometrySchlickGGX(max(dot(N, L), 0.0), roughness);
+}
+
+vec3 FresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec3 EvaluateBRDF(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float roughness, float metallic) {
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL <= 0.0) return vec3(0.0);
+
+    vec3 H = normalize(V + L);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    float NDF = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
+
+    vec3 spec = (NDF * G * F) / max(4.0 * max(dot(N, V), 0.0) * NdotL, 0.001);
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+    return (kD * albedo / PI + spec) * radiance * NdotL;
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uHdrOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    float depth = texelFetch(uDepthTex, pix, 0).r;
+
+    if (depth >= 0.99999) {
+        vec3 farWorld = ReconstructWorldPos(uv, 1.0);
+        vec3 rayDir = normalize(farWorld - uScene.cameraPos.xyz);
+        vec3 skyCol = EvaluateSky(rayDir, true);
+        skyCol = EvaluateVolumetricClouds(uScene.cameraPos.xyz, rayDir, skyCol, pix);
+        imageStore(uHdrOut, pix, vec4(skyCol, 1.0));
+        return;
+    }
+
+    vec4 albedoSamp = texelFetch(uAlbedoTex, pix, 0);
+    vec4 normRough = texelFetch(uNormalRoughTex, pix, 0);
+    vec4 metalEmis = texelFetch(uMetalEmissiveTex, pix, 0);
+
+    vec3 albedo = pow(max(albedoSamp.rgb, vec3(0.0)), vec3(2.2));
+    vec3 N = normalize(normRough.xyz);
+    float roughness = clamp(normRough.w, 0.04, 1.0);
+    float metallic = clamp(metalEmis.x, 0.0, 1.0);
+    float emissive = metalEmis.y;
+    float ao = clamp(metalEmis.w, 0.0, 1.0);
+
+    vec3 worldPos = ReconstructWorldPos(uv, depth);
+    vec3 V = normalize(uScene.cameraPos.xyz - worldPos);
+
+    bool useRtgi = (uGi.giMode == 1 && uGi.hasValidTLAS != 0);
+    vec4 giSamp = useRtgi ? textureLod(uRtgiTex, uv, 0.0) : vec4(0.0, 0.0, 0.0, 1.0);
+    if (any(isnan(giSamp)) || any(isinf(giSamp))) {
+        giSamp = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    float sunVis = (useRtgi && uGi.giRayTracedShadows != 0) ? clamp(giSamp.a, 0.0, 1.0) : 1.0;
+
+    vec3 Lo = vec3(0.0);
+
+    int dirCount = clamp(uScene.counts.x, 0, 4);
+    for (int i = 0; i < dirCount; ++i) {
+        vec3 L = normalize(-uScene.dirLights[i].directionIntensity.xyz);
+        vec3 rad = uScene.dirLights[i].colorPad.rgb * uScene.dirLights[i].directionIntensity.w;
+        float vis = (i == 0) ? sunVis : 1.0;
+        Lo += EvaluateBRDF(N, V, L, rad, albedo, roughness, metallic) * vis;
+    }
+
+    int ptCount = clamp(uScene.counts.y, 0, 32);
+    for (int i = 0; i < ptCount; ++i) {
+        vec3 toLight = uScene.pointLights[i].positionRange.xyz - worldPos;
+        float dist = length(toLight);
+        float range = max(uScene.pointLights[i].positionRange.w, 0.001);
+        if (dist < range) {
+            vec3 L = toLight / max(dist, 1e-4);
+            float att = clamp(1.0 - (dist / range), 0.0, 1.0);
+            att = (att * att) / (1.0 + 0.1 * dist * dist);
+            vec3 rad = uScene.pointLights[i].colorIntensity.rgb * uScene.pointLights[i].colorIntensity.w * att;
+            Lo += EvaluateBRDF(N, V, L, rad, albedo, roughness, metallic);
+        }
+    }
+
+    int spotCount = clamp(uScene.counts.z, 0, 16);
+    for (int i = 0; i < spotCount; ++i) {
+        vec3 toLight = uScene.spotLights[i].positionRange.xyz - worldPos;
+        float dist = length(toLight);
+        float range = max(uScene.spotLights[i].positionRange.w, 0.001);
+        if (dist < range) {
+            vec3 L = toLight / max(dist, 1e-4);
+            vec3 spotDir = normalize(uScene.spotLights[i].directionCosOuter.xyz);
+            float theta = dot(-L, spotDir);
+            float cosOuter = uScene.spotLights[i].directionCosOuter.w;
+            float cosInner = mix(cosOuter, 1.0, 0.35);
+            float spotFactor = clamp((theta - cosOuter) / max(cosInner - cosOuter, 0.001), 0.0, 1.0);
+            float att = clamp(1.0 - (dist / range), 0.0, 1.0);
+            att = (att * att) / (1.0 + 0.1 * dist * dist);
+            vec3 rad = uScene.spotLights[i].colorIntensityCosIn.rgb * uScene.spotLights[i].colorIntensityCosIn.w * att * spotFactor;
+            Lo += EvaluateBRDF(N, V, L, rad, albedo, roughness, metallic);
+        }
+    }
+
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    vec3 Fenv = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+
+    vec3 ambient;
+    vec3 specEnv = vec3(0.0);
+    if (useRtgi) {
+        vec3 giIrradiance = max(giSamp.rgb, vec3(0.0));
+        ambient = giIrradiance * albedo * (1.0 - metallic * 0.85) * uGi.giIntensity * ao;
+
+        vec3 rtRefl = textureLod(uRtReflTex, uv, 0.0).rgb;
+        if (any(isnan(rtRefl)) || any(isinf(rtRefl))) rtRefl = vec3(0.0);
+        float reflWeight = max(smoothstep(0.92, 0.10, roughness), metallic * (1.0 - roughness * 0.45));
+        specEnv = max(rtRefl, vec3(0.0)) * Fenv * reflWeight * ao;
+    } else {
+        vec3 skyAmb = EvaluateSky(N, false);
+        ambient = skyAmb * albedo * (1.0 - metallic * 0.5) * 0.28 * ao;
+        vec3 reflDir = reflect(-V, N);
+        specEnv = EvaluateSky(reflDir, true) * Fenv * (1.0 - roughness) * 0.35 * ao;
+    }
+    vec3 color = ambient + specEnv + Lo + albedo * emissive;
+
+    imageStore(uHdrOut, pix, vec4(color, 1.0));
+}

@@ -8,6 +8,7 @@
 #include "SlipEngine/render/SlipShaderLibrary.h"
 #include "SlipEngine/render/SlipShader.h"
 #include "SlipEngine/render/SlipGL.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 #include <SDL2/SDL.h>
 
 #include <filesystem>
@@ -136,11 +137,17 @@ SlipThumbnailManager::~SlipThumbnailManager() {
 
 void SlipThumbnailManager::Init() {
     if (m_Initialized) return;
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) return;
     GenerateBuiltinIcons();
     m_Initialized = true;
 }
 
 void SlipThumbnailManager::Shutdown() {
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) {
+        m_LoadedTextures.clear();
+        m_Initialized = false;
+        return;
+    }
     ClearTextureCache();
 
     if (m_FolderIcon) { glDeleteTextures(1, &m_FolderIcon); m_FolderIcon = 0; }
@@ -202,6 +209,10 @@ std::string SlipThumbnailManager::GetThumbnailPngPath(const std::string& assetPa
 }
 
 void SlipThumbnailManager::ClearTextureCache() {
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) {
+        m_LoadedTextures.clear();
+        return;
+    }
     for (auto& pair : m_LoadedTextures) {
         if (pair.second != 0) {
             glDeleteTextures(1, &pair.second);
@@ -213,7 +224,7 @@ void SlipThumbnailManager::ClearTextureCache() {
 void SlipThumbnailManager::InvalidateThumbnail(const std::string& assetPath) {
     auto it = m_LoadedTextures.find(assetPath);
     if (it != m_LoadedTextures.end()) {
-        if (it->second != 0) {
+        if (it->second != 0 && SlipRHI::GetActiveAPI() == GraphicsAPI::OpenGL) {
             glDeleteTextures(1, &it->second);
         }
         m_LoadedTextures.erase(it);
@@ -221,6 +232,7 @@ void SlipThumbnailManager::InvalidateThumbnail(const std::string& assetPath) {
 }
 
 unsigned int SlipThumbnailManager::CreateTextureFromRGBA(const unsigned char* data, int width, int height) {
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) return 0;
     if (!data || width <= 0 || height <= 0) return 0;
     unsigned int tex = 0;
     glGenTextures(1, &tex);
@@ -441,7 +453,7 @@ void SlipThumbnailManager::EnsureSphereResources() {
 }
 
 bool SlipThumbnailManager::GenerateMaterialThumbnail(const std::string& matPath, bool force) {
-    if (matPath.empty() || !SlipFileSystem::Exists(matPath) || !SDL_GL_GetCurrentContext()) return false;
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL || matPath.empty() || !SlipFileSystem::Exists(matPath) || !SDL_GL_GetCurrentContext()) return false;
 
     std::string outPng = GetThumbnailPngPath(matPath);
     if (!force && SlipFileSystem::Exists(outPng)) {
@@ -532,7 +544,7 @@ bool SlipThumbnailManager::GenerateMaterialThumbnail(const std::string& matPath,
 }
 
 bool SlipThumbnailManager::GenerateModelThumbnail(const std::string& modelPath, bool force) {
-    if (modelPath.empty() || !SlipFileSystem::Exists(modelPath) || !SDL_GL_GetCurrentContext()) return false;
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL || modelPath.empty() || !SlipFileSystem::Exists(modelPath) || !SDL_GL_GetCurrentContext()) return false;
 
     std::string outPng = GetThumbnailPngPath(modelPath);
     if (!force && SlipFileSystem::Exists(outPng)) {
@@ -651,7 +663,7 @@ bool SlipThumbnailManager::GenerateModelThumbnail(const std::string& modelPath, 
 }
 
 bool SlipThumbnailManager::GenerateTextureThumbnail(const std::string& texturePath, bool force) {
-    if (texturePath.empty() || !SlipFileSystem::Exists(texturePath)) return false;
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL || texturePath.empty() || !SlipFileSystem::Exists(texturePath)) return false;
 
     std::string outPng = GetThumbnailPngPath(texturePath);
     if (!force && SlipFileSystem::Exists(outPng)) {
@@ -717,6 +729,9 @@ bool SlipThumbnailManager::GenerateTextureThumbnail(const std::string& texturePa
 }
 
 unsigned int SlipThumbnailManager::GetThumbnail(const std::string& assetPath, bool isDirectory, const std::string& extension) {
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::OpenGL) {
+        return 0;
+    }
     if (!m_Initialized) {
         Init();
     }

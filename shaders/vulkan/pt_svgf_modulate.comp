@@ -1,0 +1,105 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uFilteredIrrVarIn;  // .rgb = filtered demodulated DiffuseIrradiance, .a = filtered diffuse variance
+layout(set = 0, binding = 1) uniform sampler2D uAlbedoIn;          // .rgb = original primary Albedo (unfiltered), .a = metallic
+layout(set = 0, binding = 2) uniform sampler2D uEmissiveIn;        // .rgb = primary Emissive (or direct sky/clouds)
+layout(set = 0, binding = 3) uniform sampler2D uNormalRoughIn;     // .xyz = world normal, .w = roughness
+layout(set = 0, binding = 4) uniform sampler2D uDepthInstIn;       // .r = linearDepth, .g = instanceID
+layout(set = 0, binding = 5) uniform sampler2D uMomentsIn;         // .r = mu1, .g = mu2, .b = historyLength
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D uHdrOut;
+layout(set = 0, binding = 7) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+} uGi;
+layout(set = 0, binding = 8) uniform sampler2D uFilteredSpecVarIn; // .rgb = filtered SpecularRadiance (unmodulated), .a = specular variance
+
+float Luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uHdrOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    vec4 irrVar = texelFetch(uFilteredIrrVarIn, pix, 0);
+    if (any(isnan(irrVar)) || any(isinf(irrVar))) irrVar = vec4(0.0);
+    vec3 filteredDiffuse = max(irrVar.rgb, vec3(0.0));
+    float filteredVar = max(irrVar.a, 0.0);
+
+    vec4 specVar = texelFetch(uFilteredSpecVarIn, pix, 0);
+    if (any(isnan(specVar)) || any(isinf(specVar))) specVar = vec4(0.0);
+    vec3 filteredSpecular = max(specVar.rgb, vec3(0.0));
+
+    // Original primary Albedo from G-Buffer (never passed through any spatial/temporal filter)
+    vec4 albedoMetal = texelFetch(uAlbedoIn, pix, 0);
+    vec3 originalAlbedo = max(albedoMetal.rgb, vec3(0.0));
+    if (any(isnan(originalAlbedo)) || any(isinf(originalAlbedo))) originalAlbedo = vec3(1.0);
+
+    vec3 primaryEmissive = max(texelFetch(uEmissiveIn, pix, 0).rgb, vec3(0.0));
+    if (any(isnan(primaryEmissive)) || any(isinf(primaryEmissive))) primaryEmissive = vec3(0.0);
+
+    vec2 depthInst = texelFetch(uDepthInstIn, pix, 0).rg;
+    float linearDepth = depthInst.x;
+    float instId      = depthInst.y;
+
+    // Sky pixel: direct unblurred sky + volumetric clouds stored in primaryEmissive
+    if (linearDepth <= 0.0001) {
+        vec3 skyHdr = max((filteredDiffuse * originalAlbedo) + filteredSpecular + primaryEmissive, vec3(0.0));
+        imageStore(uHdrOut, pix, vec4(min(skyHdr, vec3(32.0)), 1.0));
+        return;
+    }
+
+    // Residual diffuse firefly clamping on low-history disoccluded pixels using local 3x3 geometry-aware mean
+    float histLen = texelFetch(uMomentsIn, pix, 0).z;
+    if (uGi.giDenoiserEnabled != 0 && (histLen < 4.0 || filteredVar > 0.25)) {
+        vec3 nCenter = normalize(texelFetch(uNormalRoughIn, pix, 0).xyz);
+        vec3 neighMean = vec3(0.0);
+        float neighW = 0.0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 q = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
+                vec2 qDI = texelFetch(uDepthInstIn, q, 0).rg;
+                if (qDI.x <= 0.0001 || abs(instId - qDI.y) > 0.5) continue;
+                vec3 qN = normalize(texelFetch(uNormalRoughIn, q, 0).xyz);
+                if (dot(nCenter, qN) < 0.90) continue;
+                vec3 qI = max(texelFetch(uFilteredIrrVarIn, q, 0).rgb, vec3(0.0));
+                if (any(isnan(qI)) || any(isinf(qI))) continue;
+                neighMean += qI;
+                neighW += 1.0;
+            }
+        }
+        if (neighW > 0.5) {
+            neighMean /= neighW;
+            float maxLuma = max(Luminance(neighMean) * 3.0 + 0.35, 0.1);
+            float currLuma = Luminance(filteredDiffuse);
+            if (currLuma > maxLuma) {
+                filteredDiffuse *= (maxLuma / max(currLuma, 1e-4));
+            }
+        }
+    }
+
+    // Exact Final Composition: ColorFinal = (Diffuse_Filtrado * Albedo_Original) + Specular_Filtrado + Emissive
+    vec3 finalHdr = (filteredDiffuse * originalAlbedo) + filteredSpecular + primaryEmissive;
+    if (any(isnan(finalHdr)) || any(isinf(finalHdr))) {
+        finalHdr = primaryEmissive;
+    }
+    finalHdr = clamp(finalHdr, vec3(0.0), vec3(32.0));
+
+    imageStore(uHdrOut, pix, vec4(finalHdr, 1.0));
+}

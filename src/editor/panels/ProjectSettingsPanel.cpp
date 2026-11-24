@@ -6,6 +6,10 @@
 #include "SlipEngine/platform/SlipInput.h"
 #include "SlipEngine/platform/SlipWindow.h"
 #include "SlipEngine/render/SlipGraphicsSettings.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    #include "SlipEngine/render/vulkan/VulkanRHI.h"
+#endif
 #include "SlipEngine/scene/SlipComponent.h"
 #include "SlipEngine/scene/SlipEntity.h"
 #include "SlipEngine/scene/SlipLevel.h"
@@ -224,6 +228,31 @@ void ProjectSettingsPanel::RenderGraphicsCategory() {
     ImGui::Separator();
     ImGui::Spacing();
 
+#if !defined(SLIP_PLATFORM_ANDROID)
+    if (ImGui::CollapsingHeader("API Gráfica y Backend (RHI)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        const char* apiOptions[] = { "OpenGL 4.3 (Legado)", "Vulkan 1.3+ (Ray Tracing / Path Tracing)" };
+        int apiIdx = (data.graphicsAPI == SlipGraphicsAPI::Vulkan) ? 1 : 0;
+        if (ImGui::Combo("API de Renderizado (Requiere reinicio)", &apiIdx, apiOptions, 2)) {
+            data.graphicsAPI = (apiIdx == 1) ? SlipGraphicsAPI::Vulkan : SlipGraphicsAPI::OpenGL;
+        }
+        ISlipRHI* rhi = SlipRHI::Get();
+        GraphicsAPI activeApi = SlipRHI::GetActiveAPI();
+        ImGui::Text("Backend Activo: %s", SlipRHI::GetAPIName(activeApi));
+        if (rhi) {
+            const auto& caps = rhi->GetCapabilities();
+            ImGui::Text("GPU: %s (%u.%u)", caps.deviceName.c_str(), caps.apiVersionMajor, caps.apiVersionMinor);
+            ImGui::Text("Hardware Ray Tracing (VK_KHR_ray_query): %s",
+                        caps.supportsRayQuery ? "Disponible" : "No disponible en backend actual");
+        }
+        if (data.graphicsAPI != activeApi) {
+            ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.25f, 1.0f),
+                               "Guarda la configuracion y reinicia el editor (o usa --vulkan / --opengl) para aplicar el cambio de API.");
+        }
+    }
+    ImGui::Spacing();
+#endif
+
     if (ImGui::CollapsingHeader("Sombras Dinámicas (Cascaded Shadow Maps)", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
         ImGui::Checkbox("Activar Sombras Dinámicas", &data.shadowsEnabled);
@@ -285,18 +314,92 @@ void ProjectSettingsPanel::RenderGraphicsCategory() {
     }
 
     ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Iluminación Global y Sondas (DDGI)", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Iluminación Global (Ray Tracing / Path Tracing)", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
-        ImGui::TextDisabled("Solo en PC. Android conserva el renderizado actual.");
-        ImGui::Checkbox("Activar DDGI", &data.ddgiEnabled);
-        ImGui::Checkbox("Volumen de cámara dinámico", &data.ddgiCameraVolume);
-        if (data.ddgiEnabled) {
-            ImGui::SliderFloat("Espaciado de sondas", &data.ddgiSpacing, 0.5f, 16.0f, "%.2f m");
-            ImGui::SliderInt("Sondas actualizadas por frame", &data.ddgiProbesPerFrame, 1, 256);
-            ImGui::SliderInt("Rayos por sonda", &data.ddgiRaysPerProbe, 8, 128);
-            ImGui::SliderFloat("Histéresis temporal", &data.ddgiHysteresis, 0.0f, 0.98f, "%.2f");
-            ImGui::SliderFloat("Intensidad de rebote indirecto", &data.ddgiIntensity, 0.0f, 4.0f, "%.2f");
-            ImGui::Checkbox("Visualizar sondas en Viewport", &data.ddgiShowProbes);
+        ISlipRHI* rhi = SlipRHI::Get();
+        const bool rqReady = (rhi && rhi->GetAPI() == GraphicsAPI::Vulkan && rhi->GetCapabilities().supportsRayQuery);
+        ImGui::TextColored(
+            rqReady ? ImVec4(0.35f, 1.0f, 0.45f, 1.0f) : ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+            rqReady ? "Hardware Ray Tracing (VK_KHR_ray_query): Activo"
+                    : "Requiere backend Vulkan 1.3+ con VK_KHR_ray_query (en OpenGL usa fallback)"
+        );
+
+        const char* giModes[] = {
+            "Desactivado (Off)",
+            "RTGI (Tiempo Real + Denoiser)",
+            "Path Tracing"
+        };
+        int giModeIdx = static_cast<int>(data.giMode);
+        if (ImGui::Combo("Modo de Iluminación Global", &giModeIdx, giModes, 3)) {
+            data.giMode = static_cast<GlobalIlluminationMode>(giModeIdx);
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+            if (auto* vkRhi = dynamic_cast<VulkanRHI*>(rhi)) {
+                vkRhi->ResetPathTracingAccumulation();
+            }
+#endif
+        }
+
+        if (data.giMode == GlobalIlluminationMode::PathTracing) {
+            const char* ptModes[] = {
+                "Path Tracing Progresivo",
+                "Path Tracing Tiempo Real (SVGF)"
+            };
+            int ptModeIdx = static_cast<int>(data.ptMode);
+            if (ImGui::Combo("Modo de Path Tracing", &ptModeIdx, ptModes, 2)) {
+                data.ptMode = static_cast<PathTracingMode>(ptModeIdx);
+                if (data.ptMode == PathTracingMode::RealtimeSVGF && data.giRaysPerPixel > 2) {
+                    data.giRaysPerPixel = 2;
+                }
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+                if (auto* vkRhi = dynamic_cast<VulkanRHI*>(rhi)) {
+                    vkRhi->ResetPathTracingAccumulation();
+                }
+#endif
+            }
+        }
+
+        if (data.giMode != GlobalIlluminationMode::Off) {
+            ImGui::SliderInt("Rebotes (Bounces)", &data.giBounces, 1, 8);
+            const bool isRealtimePt = (data.giMode == GlobalIlluminationMode::PathTracing &&
+                                       data.ptMode == PathTracingMode::RealtimeSVGF);
+            const int maxSpp = isRealtimePt ? 2 : 4;
+            if (data.giRaysPerPixel > maxSpp) {
+                data.giRaysPerPixel = maxSpp;
+            }
+            ImGui::SliderInt(
+                data.giMode == GlobalIlluminationMode::PathTracing ? "Muestras por Frame (SPP/Frame)" : "Rayos por Píxel",
+                &data.giRaysPerPixel, 1, maxSpp);
+            ImGui::SliderFloat("Intensidad GI", &data.giIntensity, 0.0f, 4.0f, "%.2f");
+            ImGui::Checkbox("Sombras por Ray Query", &data.giRayTracedShadows);
+            ImGui::Checkbox("Denoiser Temporal/Espacial", &data.giDenoiserEnabled);
+
+            if (data.giMode == GlobalIlluminationMode::RTGI) {
+                if (data.giDenoiserEnabled) {
+                    ImGui::SliderFloat("Alfa Temporal", &data.giTemporalAlpha, 0.02f, 0.50f, "%.2f");
+                }
+            } else if (data.giMode == GlobalIlluminationMode::PathTracing) {
+                if (data.ptMode == PathTracingMode::RealtimeSVGF) {
+                    if (data.giDenoiserEnabled) {
+                        ImGui::SliderFloat("Alfa Temporal (SVGF)", &data.giTemporalAlpha, 0.02f, 0.50f, "%.2f");
+                        ImGui::SliderInt("Iteraciones À-Trous (SVGF)", &data.svgfAtrousIterations, 1, 5);
+                        ImGui::SliderFloat("Sigma Luminancia (SVGF)", &data.svgfSigmaLuminance, 0.50f, 5.00f, "%.2f");
+                        ImGui::SliderFloat("Sigma Normal (SVGF)", &data.svgfSigmaNormal, 16.0f, 256.0f, "%.1f");
+                        ImGui::SliderFloat("Sigma Profundidad (SVGF)", &data.svgfSigmaDepth, 0.25f, 4.00f, "%.2f");
+                    }
+                    ImGui::TextColored(ImVec4(0.45f, 0.90f, 1.0f, 1.0f),
+                                       "SVGF Dual: Difuso Demodulado + Especular por Roughness (1-2 SPP)");
+                } else {
+                    ImGui::SliderInt("Muestras Máximas (0 = Ilimitado)", &data.ptMaxSamples, 0, 1024);
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+                    if (auto* vkRhi = dynamic_cast<VulkanRHI*>(rhi)) {
+                        ImGui::Text("Muestras Acumuladas: %u / %d", vkRhi->GetPathTracingSampleCount(), data.ptMaxSamples);
+                        if (ImGui::Button("Reiniciar Acumulación")) {
+                            vkRhi->ResetPathTracingAccumulation();
+                        }
+                    }
+#endif
+                }
+            }
         }
     }
 

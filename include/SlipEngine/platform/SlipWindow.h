@@ -4,6 +4,7 @@
 #define SLIP_WINDOW_H
 
 #include "SlipEngine.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 
 #if defined(SLIP_PLATFORM_ANDROID) || defined(__ANDROID__)
     #include <GLES3/gl3.h>
@@ -21,6 +22,7 @@ private:
 
 	SDL_Window* m_window;
 	SDL_GLContext m_glContext;
+	GraphicsAPI m_GraphicsAPI = GraphicsAPI::OpenGL;
 
 	inline static SlipWindow* m_instance;
 public:
@@ -28,6 +30,7 @@ public:
 
 	SDL_Window* getWindow() { return m_window; }
 	SDL_GLContext getGLContext() { return m_glContext; }
+	GraphicsAPI getGraphicsAPI() const { return m_GraphicsAPI; }
 
 	int getWidth() { return width; }
 	int getHeight() { return height; }
@@ -36,9 +39,13 @@ public:
 	void setHeight(int x) { height = x; }
 
 	void OnResize(int newWidth, int newHeight);
-	void SwapBuffers() { if (m_window) SDL_GL_SwapWindow(m_window); }
+	void SwapBuffers() { if (m_window && m_GraphicsAPI == GraphicsAPI::OpenGL) SDL_GL_SwapWindow(m_window); }
 	void SetVSync(bool enabled);
-	bool IsValid() const { return m_window != nullptr && m_glContext != nullptr; }
+	bool IsValid() const {
+		if (!m_window) return false;
+		if (m_GraphicsAPI == GraphicsAPI::Vulkan) return SlipRHI::Get() != nullptr;
+		return m_glContext != nullptr;
+	}
 
 #if defined(SLIP_PLATFORM_ANDROID) || defined(__ANDROID__)
 	inline static bool InitGLAD() { return true; }
@@ -46,7 +53,7 @@ public:
 	inline static bool InitGLAD() { return gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress) != 0; }
 #endif
 
-	SlipWindow(const char* title, int width, int height);
+	SlipWindow(const char* title, int width, int height, GraphicsAPI api = GraphicsAPI::OpenGL);
 	~SlipWindow();
 };
 

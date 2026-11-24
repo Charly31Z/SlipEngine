@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstring>
 
 #if defined(SLIP_PLATFORM_ANDROID) || defined(__ANDROID__)
     #include <SDL2/SDL.h>
@@ -17,13 +18,24 @@
 #include "SlipEngine/platform/SlipInput.h"
 #include "SlipEngine/core/SlipGlobals.h"
 #include "SlipEngine/editor/SlipEditor.h"
+#include "SlipEngine/render/SlipGraphicsSettings.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
+#include "SlipEngine/tools/SlipFileSystem.h"
 
 int main(int argc, char* argv[]) {
     LOGI("Arrancando SlipEditor...");
 
-    // SlipWindow se encarga de SDL_Init, configuración de OpenGL, SDL_CreateWindow, 
-    // y creación del contexto OpenGL.
-    SlipWindow window("SlipEditor - Level Editor", 1600, 900);
+    if (SlipFileSystem::Exists("config/GraphicsSettings.ini")) {
+        SlipGraphicsSettings::Get().LoadFromFile("config/GraphicsSettings.ini");
+    }
+
+    GraphicsAPI api = SlipGraphicsSettings::Get().GetData().graphicsAPI;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--vulkan") == 0) api = GraphicsAPI::Vulkan;
+        else if (std::strcmp(argv[i], "--opengl") == 0) api = GraphicsAPI::OpenGL;
+    }
+
+    SlipWindow window("SlipEditor - Level Editor", 1600, 900, api);
     if (!window.IsValid()) {
         LOGI("Error al inicializar SlipWindow");
         return -1;
@@ -53,21 +65,31 @@ int main(int argc, char* argv[]) {
             if (event.type == SDL_QUIT) {
                 running = false;
             }
-            if (event.type == SDL_WINDOWEVENT && 
-                event.window.event == SDL_WINDOWEVENT_CLOSE && 
+            if (event.type == SDL_WINDOWEVENT &&
+                event.window.event == SDL_WINDOWEVENT_CLOSE &&
                 event.window.windowID == SDL_GetWindowID(window.getWindow())) {
                 running = false;
             }
         }
 
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (window.getGraphicsAPI() == GraphicsAPI::Vulkan) {
+            ISlipRHI* rhi = SlipRHI::Get();
+            if (rhi && rhi->BeginFrame()) {
+                editor.BeginFrame();
+                editor.RenderPanels();
+                editor.EndFrame();
+                rhi->EndFrame();
+            }
+        } else {
+            glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        editor.BeginFrame();
-        editor.RenderPanels();
-        editor.EndFrame();
+            editor.BeginFrame();
+            editor.RenderPanels();
+            editor.EndFrame();
 
-        window.SwapBuffers();
+            window.SwapBuffers();
+        }
     }
 
     editor.Shutdown();

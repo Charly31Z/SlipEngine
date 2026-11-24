@@ -2877,6 +2877,9 @@ void SlipShaderLibrary::Reset() {
 }
 
 SlipShader* SlipShaderLibrary::Get(const std::string& name) {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glCreateProgram) return nullptr;
+#endif
     if (!s_Initialized || s_Shaders.empty() || s_Shaders.find("Lit") == s_Shaders.end()) {
         Init();
     } else {

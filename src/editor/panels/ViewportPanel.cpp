@@ -9,11 +9,16 @@
 #include "SlipEngine/render/SlipPrimitive.h"
 #include "SlipEngine/render/SlipFrameBuffer.h"
 #include "SlipEngine/render/SlipGL.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    #include "SlipEngine/render/vulkan/VulkanRHI.h"
+    #include <imgui_impl_vulkan.h>
+#endif
 #include "SlipEngine/render/SlipShaderLibrary.h"
 #include "SlipEngine/render/SlipMaterial.h"
 #include "SlipEngine/render/SlipCascadedShadows.h"
 #include "SlipEngine/render/SlipGraphicsSettings.h"
-#include "SlipEngine/render/SlipDDGI.h"
+#include "SlipEngine/tools/SlipDebug.h"
 #include "SlipEngine/render/SlipPostProcess.h"
 #include "SlipEngine/render/SlipFontManager.h"
 #include "SlipEngine/scene/SlipFrustum.h"
@@ -968,28 +973,7 @@ void ViewportPanel::RenderScene() {
         glDepthMask(GL_TRUE);
     }
 
-    // 2.6 DDGI (PC). En Android Update no toca la GPU.
-    {
-        bool shadowsReady = gfxSettings.shadowsEnabled && canCastShadows && SlipCascadedShadows::Get().IsInitialized();
-        std::vector<DDGIDirectionalLight> ddgiDirs;
-        std::vector<DDGIPointLight> ddgiPoints;
-        std::vector<DDGISpotLight> ddgiSpots;
-        ddgiDirs.reserve(dirLights.size());
-        ddgiPoints.reserve(pointLights.size());
-        ddgiSpots.reserve(spotLights.size());
-        for (const auto& dl : dirLights) ddgiDirs.push_back({ dl.direction, dl.color, dl.intensity });
-        for (const auto& pl : pointLights) ddgiPoints.push_back({ pl.position, pl.color, pl.intensity, pl.range });
-        for (const auto& sl : spotLights) ddgiSpots.push_back({ sl.position, sl.direction, sl.color, sl.intensity, sl.range, sl.spotAngle });
-        bool isDraggingGizmo = (m_ActiveGizmoAxis != -1);
-        SlipDDGI::Get().Update(eye, view, m_ContextLevel,
-                               ddgiDirs.empty() ? nullptr : ddgiDirs.data(), static_cast<int>(ddgiDirs.size()),
-                               ddgiPoints.empty() ? nullptr : ddgiPoints.data(), static_cast<int>(ddgiPoints.size()),
-                               ddgiSpots.empty() ? nullptr : ddgiSpots.data(), static_cast<int>(ddgiSpots.size()),
-                               shadowsReady,
-                               isDraggingGizmo);
-    }
-
-    // 2.7 Bake de Cubemap de Reflejos bajo demanda o al cargar escena
+    // 2.6 Bake de Cubemap de Reflejos bajo demanda o al cargar escena
 #if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
     if (gfxSettings.reflectionProbeEnabled) {
         bool hasEntities = (m_ContextLevel && !m_ContextLevel->GetEntities().empty());
@@ -1516,7 +1500,7 @@ void ViewportPanel::RenderScene() {
                 shader->setFloat("u_CascadeEndClipSpace[" + std::to_string(c) + "]", clipSplits[c]);
     }
 
-            SlipDDGI::Get().Bind(shader);
+            shader->setBool("u_DDGIEnabled", false);
 
 #if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
             ReflectionProbeComponent* activeProbe = nullptr;
@@ -2141,22 +2125,6 @@ void ViewportPanel::RenderScene() {
 
     if (m_VClustEnabled && m_VClustShowBounds && (m_ActiveCameraType == ViewportCameraType::EditorCamera)) {
         DrawVClustBoundsGizmo(view, projection, eye, frustum);
-    }
-
-    if (gfxSettings.ddgiShowProbes) {
-        SlipDDGI::Get().DrawDebug(view, projection);
-    }
-
-    if (m_ContextLevel) {
-        for (SlipEntity* entity : m_ContextLevel->GetEntities()) {
-            if (!entity) continue;
-            auto volume = entity->GetComponent<DDGIVolumeComponent>();
-            if (!volume || !volume->IsEnabled()) continue;
-            bool selected = entity == m_SelectedEntity;
-            if (!volume->previewProbes && !selected) continue;
-            SlipDDGI::Get().DrawVolumeProbes(view, projection, entity->position, volume->size,
-                                             glm::ivec3(volume->probesX, volume->probesY, volume->probesZ));
-        }
     }
 
     // 5.5 Gizmos y Depuración en tiempo real (SlipDebug: predicción de drift, telemetría de vehículo, ruedas, etc.)
@@ -3080,6 +3048,16 @@ void ViewportPanel::ProcessUIInteraction() {
 }
 
 void ViewportPanel::CleanUpRenderer() {
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (SlipRHI::GetActiveAPI() == GraphicsAPI::Vulkan) {
+        if (m_VkViewportDescriptor != nullptr) {
+            ImGui_ImplVulkan_RemoveTexture(static_cast<VkDescriptorSet>(m_VkViewportDescriptor));
+            m_VkViewportDescriptor = nullptr;
+        }
+        m_VkViewportGen = 0;
+        return;
+    }
+#endif
     if (m_QuadVAO != 0) {
         glDeleteVertexArrays(1, &m_QuadVAO);
         m_QuadVAO = 0;
@@ -6273,6 +6251,462 @@ void ViewportPanel::OnImGuiRender() {
         ImVec2 windowPos = ImGui::GetWindowPos();
         m_ViewportBounds[0] = { minBound.x + windowPos.x, minBound.y + windowPos.y };
         m_ViewportBounds[1] = { maxBound.x + windowPos.x, maxBound.y + windowPos.y };
+
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+        if (SlipRHI::GetActiveAPI() == GraphicsAPI::Vulkan) {
+            VulkanRHI* vkRhi = dynamic_cast<VulkanRHI*>(SlipRHI::Get());
+            bool isCanvasHovered = false;
+            bool isCanvasActive = false;
+
+            CameraComponent* activeGameCam = nullptr;
+            if (m_ActiveCameraType == ViewportCameraType::GameCamera && m_ContextLevel) {
+                activeGameCam = m_ContextLevel->GetMainCamera();
+            }
+
+            float aspect = (m_ViewportSize.y > 0.0f) ? (m_ViewportSize.x / m_ViewportSize.y) : 1.0f;
+            glm::mat4 projection(1.0f);
+            glm::mat4 view(1.0f);
+            glm::vec3 eye(0.0f);
+            glm::vec3 forward(0.0f, 0.0f, -1.0f), right(1.0f, 0.0f, 0.0f), up(0.0f, 1.0f, 0.0f);
+
+            if (activeGameCam) {
+                if (SlipEditor::GetInstance() && !SlipEditor::GetInstance()->IsPlaying()) {
+                    activeGameCam->OnUpdate(ImGui::GetIO().DeltaTime);
+                }
+                view = activeGameCam->GetViewMatrix();
+                projection = activeGameCam->GetProjectionMatrix(aspect);
+                eye = activeGameCam->GetPosition();
+                forward = activeGameCam->GetForward();
+                up = activeGameCam->GetUp();
+                right = activeGameCam->GetRight();
+            } else if (m_Is2DMode) {
+                float orthoHalfH = (std::max)(0.5f, m_CameraDistance * 0.65f);
+                float orthoHalfW = orthoHalfH * aspect;
+                eye = glm::vec3(m_CameraTarget.x, m_CameraTarget.y, 15.0f);
+                view = glm::lookAt(eye, glm::vec3(m_CameraTarget.x, m_CameraTarget.y, 0.0f), up);
+                projection = glm::ortho(-orthoHalfW, orthoHalfW, -orthoHalfH, orthoHalfH, -100.0f, 100.0f);
+            } else {
+                float radPitch = glm::radians(m_CameraPitch);
+                float radYaw = glm::radians(m_CameraYaw);
+                forward = glm::normalize(glm::vec3(
+                    -cos(radPitch) * sin(radYaw),
+                    -sin(radPitch),
+                    -cos(radPitch) * cos(radYaw)
+                ));
+                right = glm::normalize(glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f)));
+                up = glm::normalize(glm::cross(right, forward));
+
+                if (!m_CameraPosInitialized) {
+                    m_CameraPos = m_CameraTarget - forward * m_CameraDistance;
+                    m_CameraPosInitialized = true;
+                }
+                eye = m_CameraPos;
+                m_CameraTarget = m_CameraPos + forward * m_CameraDistance;
+                view = glm::lookAt(eye, eye + forward, glm::vec3(0.0f, 1.0f, 0.0f));
+                projection = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 1000.0f);
+            }
+
+            if (vkRhi && m_ViewportSize.x > 1.0f && m_ViewportSize.y > 1.0f) {
+                vkRhi->EnsureViewportSize(static_cast<int>(m_ViewportSize.x), static_cast<int>(m_ViewportSize.y));
+                vkRhi->SetSelectedEntity((m_ShowGizmos && m_ActiveCameraType == ViewportCameraType::EditorCamera && !androidGameView) ? m_SelectedEntity : nullptr);
+                vkRhi->RenderSceneToViewport(m_ContextLevel, view, projection, eye);
+                m_StatDrawCalls = static_cast<int>(vkRhi->GetLastDrawCallCount());
+
+                if (m_VkViewportGen != vkRhi->GetViewportGeneration() && vkRhi->GetViewportImageView() != VK_NULL_HANDLE) {
+                    if (m_VkViewportDescriptor != nullptr) {
+                        ImGui_ImplVulkan_RemoveTexture(static_cast<VkDescriptorSet>(m_VkViewportDescriptor));
+                        m_VkViewportDescriptor = nullptr;
+                    }
+                    m_VkViewportDescriptor = ImGui_ImplVulkan_AddTexture(
+                        vkRhi->GetViewportSampler(),
+                        vkRhi->GetViewportImageView(),
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    );
+                    m_VkViewportGen = vkRhi->GetViewportGeneration();
+                }
+
+                if (m_VkViewportDescriptor != nullptr) {
+                    ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+                    m_ViewportBounds[0] = { cursorPos.x, cursorPos.y };
+                    m_ViewportBounds[1] = { cursorPos.x + m_ViewportSize.x, cursorPos.y + m_ViewportSize.y };
+                    ImGui::Image(
+                        reinterpret_cast<ImTextureID>(m_VkViewportDescriptor),
+                        ImVec2(m_ViewportSize.x, m_ViewportSize.y),
+                        ImVec2(0.0f, 0.0f),
+                        ImVec2(1.0f, 1.0f)
+                    );
+
+                    ImGui::SetCursorScreenPos(cursorPos);
+                    ImGui::SetNextItemAllowOverlap();
+                    ImGui::InvisibleButton("##ViewportCanvasArea", ImVec2(m_ViewportSize.x, m_ViewportSize.y),
+                        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+                    isCanvasHovered = ImGui::IsItemHovered();
+                    isCanvasActive = ImGui::IsItemActive();
+
+                    const glm::mat4 vkViewProj = projection * view;
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+                    if (m_ShowGizmos) {
+                        auto drawLine3D = [&](const glm::vec3& a, const glm::vec3& b, ImU32 col, float thickness = 1.5f) {
+                            glm::vec2 sp0, sp1;
+                            if (ProjectToScreen(a, vkViewProj, sp0) && ProjectToScreen(b, vkViewProj, sp1)) {
+                                dl->AddLine(ImVec2(sp0.x, sp0.y), ImVec2(sp1.x, sp1.y), col, thickness);
+                            }
+                        };
+                        auto drawBox3D = [&](const glm::mat4& xform, const glm::vec3& bMin, const glm::vec3& bMax, ImU32 col, float thickness = 1.5f) {
+                            glm::vec3 corners[8] = {
+                                glm::vec3(xform * glm::vec4(bMin.x, bMin.y, bMin.z, 1.0f)),
+                                glm::vec3(xform * glm::vec4(bMax.x, bMin.y, bMin.z, 1.0f)),
+                                glm::vec3(xform * glm::vec4(bMax.x, bMax.y, bMin.z, 1.0f)),
+                                glm::vec3(xform * glm::vec4(bMin.x, bMax.y, bMin.z, 1.0f)),
+                                glm::vec3(xform * glm::vec4(bMin.x, bMin.y, bMax.z, 1.0f)),
+                                glm::vec3(xform * glm::vec4(bMax.x, bMin.y, bMax.z, 1.0f)),
+                                glm::vec3(xform * glm::vec4(bMax.x, bMax.y, bMax.z, 1.0f)),
+                                glm::vec3(xform * glm::vec4(bMin.x, bMax.y, bMax.z, 1.0f))
+                            };
+                            static const int kBoxEdges[12][2] = {
+                                {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}
+                            };
+                            for (const auto& e : kBoxEdges) {
+                                drawLine3D(corners[e[0]], corners[e[1]], col, thickness);
+                            }
+                        };
+
+                        std::vector<glm::vec3> debugLineData;
+                        SlipDebug::Get().ConsumePendingLines(debugLineData);
+                        for (size_t i = 0; i + 3 < debugLineData.size(); i += 4) {
+                            const glm::vec3& c = debugLineData[i + 1];
+                            ImU32 col32 = IM_COL32(
+                                static_cast<int>(glm::clamp(c.r, 0.0f, 1.0f) * 255.0f),
+                                static_cast<int>(glm::clamp(c.g, 0.0f, 1.0f) * 255.0f),
+                                static_cast<int>(glm::clamp(c.b, 0.0f, 1.0f) * 255.0f),
+                                230
+                            );
+                            drawLine3D(debugLineData[i], debugLineData[i + 2], col32, 1.5f);
+                        }
+
+                        if (m_ContextLevel && m_ActiveCameraType == ViewportCameraType::EditorCamera && !androidGameView) {
+                            for (SlipEntity* ent : m_ContextLevel->GetEntities()) {
+                                if (!ent) continue;
+                                glm::vec3 entPos = glm::vec3(ent->getMatrix()[3]);
+                                glm::vec2 sPos;
+                                if (auto lc = ent->GetComponent<LightComponent>()) {
+                                    if (ProjectToScreen(entPos, vkViewProj, sPos)) {
+                                        dl->AddCircleFilled(ImVec2(sPos.x, sPos.y), 6.0f, IM_COL32(255, 220, 90, 220));
+                                        dl->AddCircle(ImVec2(sPos.x, sPos.y), 9.0f, IM_COL32(255, 195, 45, 180), 12, 1.5f);
+                                    }
+                                    if (lc->type == LightType::Directional && ent != m_SelectedEntity) {
+                                        glm::vec3 rot = ent->rotation;
+                                        glm::mat4 rotMat = glm::rotate(glm::mat4(1.0f), glm::radians(rot.x), glm::vec3(1, 0, 0)) *
+                                                           glm::rotate(glm::mat4(1.0f), glm::radians(rot.y), glm::vec3(0, 1, 0)) *
+                                                           glm::rotate(glm::mat4(1.0f), glm::radians(rot.z), glm::vec3(0, 0, 1));
+                                        glm::vec3 dir = glm::normalize(glm::vec3(rotMat * glm::vec4(0.0f, -1.0f, -0.5f, 0.0f)));
+                                        glm::vec3 upAxis = (std::abs(dir.y) > 0.9f) ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+                                        glm::vec3 rightAxis = glm::normalize(glm::cross(dir, upAxis));
+                                        upAxis = glm::normalize(glm::cross(rightAxis, dir));
+                                        glm::vec3 tip = entPos + dir * 2.2f;
+                                        const ImU32 dirCol = IM_COL32(255, 215, 70, 210);
+                                        drawLine3D(entPos, tip, dirCol, 1.8f);
+                                        drawLine3D(tip, tip - dir * 0.35f + rightAxis * 0.18f, dirCol, 1.6f);
+                                        drawLine3D(tip, tip - dir * 0.35f - rightAxis * 0.18f, dirCol, 1.6f);
+                                        drawLine3D(tip, tip - dir * 0.35f + upAxis * 0.18f, dirCol, 1.6f);
+                                        drawLine3D(tip, tip - dir * 0.35f - upAxis * 0.18f, dirCol, 1.6f);
+                                    }
+                                }
+                                if (ent->HasComponent<CameraComponent>() && ProjectToScreen(entPos, vkViewProj, sPos)) {
+                                    dl->AddRect(ImVec2(sPos.x - 6.0f, sPos.y - 4.0f), ImVec2(sPos.x + 6.0f, sPos.y + 4.0f), IM_COL32(130, 210, 255, 220), 2.0f, 0, 1.5f);
+                                }
+                            }
+                        }
+
+                        if (m_SelectedEntity) {
+                            if (auto selLight = m_SelectedEntity->GetComponent<LightComponent>()) {
+                                constexpr float kPi = 3.14159265358979323846f;
+                                const ImU32 lightCol = IM_COL32(255, 225, 64, 240);
+                                glm::vec3 pos = m_SelectedEntity->position;
+                                glm::vec3 rot = m_SelectedEntity->rotation;
+                                glm::mat4 rotMat = glm::rotate(glm::mat4(1.0f), glm::radians(rot.x), glm::vec3(1, 0, 0)) *
+                                                   glm::rotate(glm::mat4(1.0f), glm::radians(rot.y), glm::vec3(0, 1, 0)) *
+                                                   glm::rotate(glm::mat4(1.0f), glm::radians(rot.z), glm::vec3(0, 0, 1));
+                                glm::vec3 dir = glm::normalize(glm::vec3(rotMat * glm::vec4(0.0f, -1.0f, -0.5f, 0.0f)));
+                                glm::vec3 upAxis = (std::abs(dir.y) > 0.9f) ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+                                glm::vec3 rightAxis = glm::normalize(glm::cross(dir, upAxis));
+                                upAxis = glm::normalize(glm::cross(rightAxis, dir));
+
+                                if (selLight->type == LightType::Directional) {
+                                    float sunRadius = 0.8f;
+                                    const int segments = 32;
+                                    for (int s = 0; s < segments; ++s) {
+                                        float a0 = static_cast<float>(s) / segments * 2.0f * kPi;
+                                        float a1 = static_cast<float>(s + 1) / segments * 2.0f * kPi;
+                                        glm::vec3 p0 = pos + (rightAxis * std::cos(a0) + upAxis * std::sin(a0)) * sunRadius;
+                                        glm::vec3 p1 = pos + (rightAxis * std::cos(a1) + upAxis * std::sin(a1)) * sunRadius;
+                                        drawLine3D(p0, p1, lightCol, 1.6f);
+                                    }
+                                    glm::vec3 arrowTip = pos + dir * 2.5f;
+                                    drawLine3D(pos, arrowTip, lightCol, 2.2f);
+                                    drawLine3D(arrowTip, arrowTip - dir * 0.4f + rightAxis * 0.2f, lightCol, 2.0f);
+                                    drawLine3D(arrowTip, arrowTip - dir * 0.4f - rightAxis * 0.2f, lightCol, 2.0f);
+                                    drawLine3D(arrowTip, arrowTip - dir * 0.4f + upAxis * 0.2f, lightCol, 2.0f);
+                                    drawLine3D(arrowTip, arrowTip - dir * 0.4f - upAxis * 0.2f, lightCol, 2.0f);
+                                    glm::vec3 rayOffsets[4] = { rightAxis * sunRadius, -rightAxis * sunRadius, upAxis * sunRadius, -upAxis * sunRadius };
+                                    for (int r = 0; r < 4; ++r) {
+                                        glm::vec3 rStart = pos + rayOffsets[r];
+                                        glm::vec3 rEnd = rStart + dir * 1.8f;
+                                        drawLine3D(rStart, rEnd, lightCol, 1.4f);
+                                        drawLine3D(rEnd, rEnd - dir * 0.25f + rightAxis * 0.1f, lightCol, 1.4f);
+                                        drawLine3D(rEnd, rEnd - dir * 0.25f - rightAxis * 0.1f, lightCol, 1.4f);
+                                    }
+                                } else if (selLight->type == LightType::Point) {
+                                    float r = (std::max)(selLight->range, 0.1f);
+                                    const int segments = 36;
+                                    for (int s = 0; s < segments; ++s) {
+                                        float a0 = static_cast<float>(s) / segments * 2.0f * kPi;
+                                        float a1 = static_cast<float>(s + 1) / segments * 2.0f * kPi;
+                                        drawLine3D(pos + glm::vec3(std::cos(a0) * r, std::sin(a0) * r, 0.0f), pos + glm::vec3(std::cos(a1) * r, std::sin(a1) * r, 0.0f), lightCol, 1.4f);
+                                        drawLine3D(pos + glm::vec3(std::cos(a0) * r, 0.0f, std::sin(a0) * r), pos + glm::vec3(std::cos(a1) * r, 0.0f, std::sin(a1) * r), lightCol, 1.4f);
+                                        drawLine3D(pos + glm::vec3(0.0f, std::cos(a0) * r, std::sin(a0) * r), pos + glm::vec3(0.0f, std::cos(a1) * r, std::sin(a1) * r), lightCol, 1.4f);
+                                    }
+                                    float cs = 0.25f;
+                                    drawLine3D(pos - glm::vec3(cs, 0, 0), pos + glm::vec3(cs, 0, 0), lightCol, 1.5f);
+                                    drawLine3D(pos - glm::vec3(0, cs, 0), pos + glm::vec3(0, cs, 0), lightCol, 1.5f);
+                                    drawLine3D(pos - glm::vec3(0, 0, cs), pos + glm::vec3(0, 0, cs), lightCol, 1.5f);
+                                } else if (selLight->type == LightType::Spot) {
+                                    float range = (std::max)(selLight->range, 0.1f);
+                                    float baseRadius = range * std::tan(glm::radians(selLight->spotAngle * 0.5f));
+                                    glm::vec3 baseCenter = pos + dir * range;
+                                    const int segments = 36;
+                                    for (int s = 0; s < segments; ++s) {
+                                        float a0 = static_cast<float>(s) / segments * 2.0f * kPi;
+                                        float a1 = static_cast<float>(s + 1) / segments * 2.0f * kPi;
+                                        drawLine3D(baseCenter + (rightAxis * std::cos(a0) + upAxis * std::sin(a0)) * baseRadius,
+                                                   baseCenter + (rightAxis * std::cos(a1) + upAxis * std::sin(a1)) * baseRadius, lightCol, 1.5f);
+                                    }
+                                    drawLine3D(pos, baseCenter + rightAxis * baseRadius, lightCol, 1.4f);
+                                    drawLine3D(pos, baseCenter - rightAxis * baseRadius, lightCol, 1.4f);
+                                    drawLine3D(pos, baseCenter + upAxis * baseRadius, lightCol, 1.4f);
+                                    drawLine3D(pos, baseCenter - upAxis * baseRadius, lightCol, 1.4f);
+                                    drawLine3D(pos, baseCenter, lightCol, 1.8f);
+                                    drawLine3D(baseCenter, baseCenter - dir * 0.3f + rightAxis * 0.15f, lightCol, 1.6f);
+                                    drawLine3D(baseCenter, baseCenter - dir * 0.3f - rightAxis * 0.15f, lightCol, 1.6f);
+                                }
+                            }
+
+                            if (auto selPPV = m_SelectedEntity->GetComponent<PostProcessVolumeComponent>()) {
+                                if (!selPPV->isGlobal) {
+                                    glm::vec3 h = selPPV->size * 0.5f;
+                                    drawBox3D(glm::translate(glm::mat4(1.0f), m_SelectedEntity->position), -h, h, IM_COL32(158, 115, 242, 225), 1.6f);
+                                }
+                            }
+
+                            if (auto selProbe = m_SelectedEntity->GetComponent<ReflectionProbeComponent>()) {
+                                glm::vec3 h = selProbe->size * 0.5f;
+                                drawBox3D(glm::translate(glm::mat4(1.0f), m_SelectedEntity->position), -h, h, IM_COL32(51, 217, 242, 225), 1.6f);
+                            }
+
+                            if (auto boxCol = m_SelectedEntity->GetComponent<BoxColliderComponent>()) {
+                                glm::vec3 h = boxCol->size * 0.5f;
+                                drawBox3D(m_SelectedEntity->getMatrix(), boxCol->centerOffset - h, boxCol->centerOffset + h, IM_COL32(80, 240, 120, 210), 1.5f);
+                            }
+
+                            if (SlipGraphicsSettings::Get().GetData().giMode == GlobalIlluminationMode::PathTracing) {
+                                if (auto mc = m_SelectedEntity->GetComponent<MeshComponent>()) {
+                                    if (mc->model) {
+                                        if (mc->model->aabbMin == glm::vec3(-0.5f) && mc->model->aabbMax == glm::vec3(0.5f)) {
+                                            mc->model->computeBounds();
+                                        }
+                                        drawBox3D(m_SelectedEntity->getMatrix(), mc->model->aabbMin, mc->model->aabbMax, IM_COL32(66, 150, 250, 235), 2.0f);
+                                    }
+                                } else if (dynamic_cast<SlipPrimitiveEntity*>(m_SelectedEntity)) {
+                                    drawBox3D(m_SelectedEntity->getMatrix(), glm::vec3(-0.5f), glm::vec3(0.5f), IM_COL32(66, 150, 250, 235), 2.0f);
+                                }
+                            }
+                        }
+                    } else {
+                        SlipDebug::Get().cleanLines();
+                    }
+
+                    if (m_ActiveCameraType == ViewportCameraType::GameCamera && !activeGameCam) {
+                        const char* noCamMsg = "Sin CameraComponent en la escena (Mostrando vista de editor)";
+                        ImVec2 txtSz = ImGui::CalcTextSize(noCamMsg);
+                        ImVec2 center(m_ViewportBounds[0].x + (m_ViewportSize.x - txtSz.x) * 0.5f, m_ViewportBounds[0].y + 16.0f);
+                        dl->AddRectFilled(ImVec2(center.x - 10.0f, center.y - 4.0f),
+                                          ImVec2(center.x + txtSz.x + 10.0f, center.y + txtSz.y + 4.0f),
+                                          IM_COL32(20, 24, 30, 210), 4.0f);
+                        dl->AddText(center, IM_COL32(255, 185, 40, 255), noCamMsg);
+                    }
+
+                    if (m_ActiveCameraType == ViewportCameraType::EditorCamera && !androidGameView) {
+                        DrawGizmo(view, projection);
+                    }
+                }
+            }
+
+            // Focus animation & camera navigation in Vulkan Viewport
+            if (m_FocusActive) {
+                bool userNavigating = ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
+                                      ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
+                                      (ImGui::IsKeyDown(ImGuiKey_LeftAlt) && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) ||
+                                      ImGui::IsKeyDown(ImGuiKey_W) || ImGui::IsKeyDown(ImGuiKey_A) ||
+                                      ImGui::IsKeyDown(ImGuiKey_S) || ImGui::IsKeyDown(ImGuiKey_D);
+                if (userNavigating) {
+                    m_FocusActive = false;
+                } else {
+                    UpdateFocusAnimation(ImGui::GetIO().DeltaTime);
+                }
+            }
+
+            if ((isCanvasActive || isCanvasHovered) &&
+                m_ActiveGizmoAxis == -1 &&
+                m_GizmoHoveredAxis == -1 &&
+                m_ActiveCameraType == ViewportCameraType::EditorCamera)
+            {
+                if (m_Is2DMode && (ImGui::IsMouseDragging(ImGuiMouseButton_Right) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle))) {
+                    ImGuiMouseButton panBtn = ImGui::IsMouseDragging(ImGuiMouseButton_Right) ? ImGuiMouseButton_Right : ImGuiMouseButton_Middle;
+                    ImVec2 dragDelta = ImGui::GetMouseDragDelta(panBtn);
+                    float panSpeed = (m_CameraDistance * 1.3f) / (std::max)(100.0f, m_ViewportSize.y);
+                    m_CameraTarget += right * (-dragDelta.x * panSpeed) + up * (dragDelta.y * panSpeed);
+                    m_CameraPos = m_CameraTarget - forward * m_CameraDistance;
+                    ImGui::ResetMouseDragDelta(panBtn);
+                } else if (ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
+                    ImVec2 dragDelta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right);
+                    m_CameraYaw -= dragDelta.x * 0.35f;
+                    m_CameraPitch += dragDelta.y * 0.35f;
+                    m_CameraPitch = glm::clamp(m_CameraPitch, -89.0f, 89.0f);
+                    m_CameraTarget = m_CameraPos + forward * m_CameraDistance;
+                    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Right);
+                } else if (ImGui::IsKeyDown(ImGuiKey_LeftAlt) && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    ImVec2 dragDelta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                    m_CameraYaw -= dragDelta.x * 0.35f;
+                    m_CameraPitch += dragDelta.y * 0.35f;
+                    m_CameraPitch = glm::clamp(m_CameraPitch, -89.0f, 89.0f);
+                    m_CameraPos = m_CameraTarget - forward * m_CameraDistance;
+                    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                } else if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                    ImVec2 dragDelta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
+                    float panSpeed = 0.008f * m_CameraDistance;
+                    glm::vec3 panDelta = right * (-dragDelta.x * panSpeed) + up * (dragDelta.y * panSpeed);
+                    m_CameraPos += panDelta;
+                    m_CameraTarget += panDelta;
+                    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
+                }
+
+                if (ImGui::GetIO().MouseWheel != 0.0f) {
+                    float wheelDelta = ImGui::GetIO().MouseWheel;
+                    if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                        m_CameraPos += forward * (wheelDelta * 2.5f);
+                        m_CameraTarget = m_CameraPos + forward * m_CameraDistance;
+                    } else {
+                        m_CameraPos += forward * (wheelDelta * (std::max)(1.0f, m_CameraDistance * 0.25f));
+                        m_CameraDistance -= wheelDelta * (m_CameraDistance * 0.15f);
+                        m_CameraDistance = glm::clamp(m_CameraDistance, 0.5f, 150.0f);
+                        m_CameraTarget = m_CameraPos + forward * m_CameraDistance;
+                    }
+                }
+            }
+
+            if ((m_IsHovered || m_IsFocused) && !ImGui::IsMouseDown(ImGuiMouseButton_Right) && m_ActiveGizmoAxis == -1) {
+                if (ImGui::IsKeyPressed(ImGuiKey_Q)) m_GizmoMode = GizmoMode::None;
+                if (ImGui::IsKeyPressed(ImGuiKey_W)) m_GizmoMode = GizmoMode::Translate;
+                if (ImGui::IsKeyPressed(ImGuiKey_E)) m_GizmoMode = GizmoMode::Rotate;
+                if (ImGui::IsKeyPressed(ImGuiKey_R)) m_GizmoMode = GizmoMode::Scale;
+                if (ImGui::IsKeyPressed(ImGuiKey_X)) {
+                    m_GizmoSpace = (m_GizmoSpace == GizmoSpace::Local) ? GizmoSpace::World : GizmoSpace::Local;
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_C)) {
+                    m_ActiveCameraType = (m_ActiveCameraType == ViewportCameraType::GameCamera) ? ViewportCameraType::EditorCamera : ViewportCameraType::GameCamera;
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+                    FocusOnSelection();
+                }
+            }
+
+            if ((m_IsHovered || m_IsFocused) && ImGui::IsMouseDown(ImGuiMouseButton_Right) && m_ActiveCameraType == ViewportCameraType::EditorCamera) {
+                float dt = ImGui::GetIO().DeltaTime;
+                if (dt > 0.1f) dt = 0.1f;
+                float speed = ImGui::IsKeyDown(ImGuiKey_LeftShift) ? 18.0f : 7.0f;
+                glm::vec3 moveDir(0.0f);
+                if (ImGui::IsKeyDown(ImGuiKey_W)) moveDir += forward;
+                if (ImGui::IsKeyDown(ImGuiKey_S)) moveDir -= forward;
+                if (ImGui::IsKeyDown(ImGuiKey_D)) moveDir += right;
+                if (ImGui::IsKeyDown(ImGuiKey_A)) moveDir -= right;
+                if (ImGui::IsKeyDown(ImGuiKey_E) || ImGui::IsKeyDown(ImGuiKey_Space)) moveDir += glm::vec3(0.0f, 1.0f, 0.0f);
+                if (ImGui::IsKeyDown(ImGuiKey_Q)) moveDir -= glm::vec3(0.0f, 1.0f, 0.0f);
+                if (glm::length(moveDir) > 0.001f) {
+                    m_CameraPos += glm::normalize(moveDir) * speed * dt;
+                    m_CameraTarget = m_CameraPos + forward * m_CameraDistance;
+                }
+            }
+
+            if (isCanvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_ActiveGizmoAxis == -1 && m_GizmoHoveredAxis == -1 && !ImGui::IsKeyDown(ImGuiKey_LeftAlt)) {
+                ImVec2 mousePos = ImGui::GetMousePos();
+                SlipEntity* hit = CastRayFromMouse(glm::vec2(mousePos.x, mousePos.y), view, projection);
+                if (ImGui::GetIO().KeyCtrl && hit) {
+                    bool wasSelected = IsEntitySelected(hit);
+                    std::vector<SlipEntity*> sel;
+                    if (wasSelected) {
+                        for (SlipEntity* e : m_Selection) {
+                            if (e != hit) sel.push_back(e);
+                        }
+                    } else {
+                        sel = m_Selection;
+                        sel.push_back(hit);
+                    }
+                    ApplySelection(sel, hit);
+                    if (m_OnMultiSelectCallback) m_OnMultiSelectCallback(sel, hit);
+                } else {
+                    m_SelectedEntity = hit;
+                    if (m_OnSelectCallback) {
+                        m_OnSelectCallback(hit);
+                    }
+                }
+            }
+
+            if (vkRhi && m_ShowStats && m_ViewportSize.x > 200.0f && m_ViewportSize.y > 150.0f) {
+                const auto& caps = vkRhi->GetCapabilities();
+                const auto& gfxCfg = SlipGraphicsSettings::Get().GetData();
+                ImVec2 statsPos(m_ViewportBounds[0].x + 12.0f, m_ViewportBounds[1].y - 160.0f);
+                ImGui::SetNextWindowPos(statsPos, ImGuiCond_Always);
+                ImGui::SetNextWindowBgAlpha(0.78f);
+                ImGuiWindowFlags statsFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                              ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+                if (ImGui::Begin("##ViewportStatsHUD", nullptr, statsFlags)) {
+                    float fps = ImGui::GetIO().Framerate;
+                    float ms = (fps > 0.0f) ? (1000.0f / fps) : 0.0f;
+                    ImVec4 fpsColor = (fps >= 55.0f) ? ImVec4(0.35f, 1.0f, 0.45f, 1.0f) :
+                                      ((fps >= 28.0f) ? ImVec4(1.0f, 0.85f, 0.2f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f));
+
+                    ImGui::TextColored(fpsColor, "FPS: %.1f  (%.2f ms)", fps, ms);
+                    ImGui::Separator();
+                    ImGui::Text("API: Vulkan %u.%u (%s)", caps.apiVersionMajor, caps.apiVersionMinor, caps.deviceName.c_str());
+                    ImGui::Text("Viewport: %dx%d | Draw Calls: %d", vkRhi->GetViewportWidth(), vkRhi->GetViewportHeight(), m_StatDrawCalls);
+                    ImGui::Text("Instancias RT (TLAS): %u", vkRhi->GetLastRtInstanceCount());
+                    if (gfxCfg.giMode == GlobalIlluminationMode::PathTracing && caps.supportsRayQuery) {
+                        if (gfxCfg.ptMode == PathTracingMode::RealtimeSVGF) {
+                            ImGui::TextColored(ImVec4(0.45f, 0.85f, 1.0f, 1.0f),
+                                               "GI: Path Tracing Tiempo Real (SVGF | %d spp/f)",
+                                               (std::min)(gfxCfg.giRaysPerPixel, 2));
+                        } else {
+                            ImGui::TextColored(ImVec4(0.45f, 0.85f, 1.0f, 1.0f),
+                                               "GI: Path Tracing Progresivo (%u / %d spp | %d spp/f)",
+                                               vkRhi->GetPathTracingSampleCount(), gfxCfg.ptMaxSamples, gfxCfg.giRaysPerPixel);
+                        }
+                    } else if (gfxCfg.giMode == GlobalIlluminationMode::RTGI && caps.supportsRayQuery) {
+                        ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.65f, 1.0f),
+                                           "GI: RTGI + Denoiser (%s)", gfxCfg.giDenoiserEnabled ? "ON" : "OFF");
+                    } else {
+                        ImGui::TextDisabled("GI: Off (PBR Directo)");
+                    }
+                    ImGui::End();
+                }
+            }
+
+            ImGui::End();
+            ImGui::PopStyleVar();
+            return;
+        }
+#endif
 
         if (!m_RendererInitialized) {
             InitRenderer();

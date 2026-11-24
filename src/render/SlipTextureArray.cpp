@@ -17,6 +17,9 @@ SlipTextureArray::~SlipTextureArray()
 
 bool SlipTextureArray::Init()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenTextures) return false;
+#endif
     if (m_TextureId != 0) return true;
 
     glGenTextures(1, &m_TextureId);
@@ -45,6 +48,9 @@ bool SlipTextureArray::Init()
 void SlipTextureArray::Clean()
 {
     if (m_TextureId != 0) {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+        if (glad_glDeleteTextures)
+#endif
         glDeleteTextures(1, &m_TextureId);
         m_TextureId = 0;
     }
@@ -130,6 +136,9 @@ int SlipTextureArray::AddOrGetTextureLayer(const std::string& texturePath)
 
 bool SlipTextureArray::UploadLayer(int layer, const uint8_t* rgbaData)
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glBindTexture) return false;
+#endif
     if (m_TextureId == 0 || !rgbaData || layer < 0 || layer >= static_cast<int>(m_MaxLayers)) {
         return false;
     }
@@ -145,12 +154,18 @@ bool SlipTextureArray::UploadLayer(int layer, const uint8_t* rgbaData)
 void SlipTextureArray::Bind(unsigned int unit) const
 {
     if (m_TextureId == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glActiveTexture || !glad_glBindTexture) return;
+#endif
     glActiveTexture(GL_TEXTURE0 + unit);
     glBindTexture(GL_TEXTURE_2D_ARRAY, m_TextureId);
 }
 
 void SlipTextureArray::Unbind(unsigned int unit) const
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glActiveTexture || !glad_glBindTexture) return;
+#endif
     glActiveTexture(GL_TEXTURE0 + unit);
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 }

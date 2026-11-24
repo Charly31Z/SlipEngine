@@ -9,7 +9,9 @@
 
 void SlipFrameBuffer::initMesh()
 {
-
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glGenVertexArrays) return;
+#endif
 	glGenVertexArrays(1, &VAO);
 	glGenBuffers(1, &VBO);
 	glGenBuffers(1, &EBO);
@@ -39,6 +41,9 @@ void SlipFrameBuffer::initMesh()
 
 void SlipFrameBuffer::initFramebuffer()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glGenFramebuffers) return;
+#endif
 	glGenFramebuffers(1, &fbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
@@ -82,6 +87,9 @@ SlipFrameBuffer::SlipFrameBuffer()
 
 void SlipFrameBuffer::init()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glGenFramebuffers || !glad_glGenVertexArrays) return;
+#endif
 	shader = new SlipShader("assets/shaders/screen.vert", "assets/shaders/screen.frag");
 
 	initMesh();
@@ -90,6 +98,9 @@ void SlipFrameBuffer::init()
 
 void SlipFrameBuffer::resize()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glBindFramebuffer) return;
+#endif
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
 	glBindTexture(GL_TEXTURE_2D, texture);
@@ -109,16 +120,27 @@ void SlipFrameBuffer::resize()
 
 void SlipFrameBuffer::bind()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glBindFramebuffer) return;
+#endif
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 }
 
 void SlipFrameBuffer::unbind()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glBindFramebuffer) return;
+#endif
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void SlipFrameBuffer::draw()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (!glad_glBindVertexArray || !shader) return;
+#else
+	if (!shader) return;
+#endif
 	shader->use();
 
 	shader->setInt("screenTexture", 0);
@@ -133,9 +155,16 @@ void SlipFrameBuffer::draw()
 
 void SlipFrameBuffer::clean()
 {
-	glDeleteVertexArrays(1, &VAO);
-	glDeleteBuffers(1, &VBO);
-	glDeleteBuffers(1, &EBO);
-	glDeleteFramebuffers(1, &fbo);
-	shader->destroy();
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	if (glad_glDeleteVertexArrays) {
+#endif
+	if (VAO != 0) glDeleteVertexArrays(1, &VAO);
+	if (VBO != 0) glDeleteBuffers(1, &VBO);
+	if (EBO != 0) glDeleteBuffers(1, &EBO);
+	if (fbo != 0) glDeleteFramebuffers(1, &fbo);
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+	}
+#endif
+	VAO = VBO = EBO = fbo = 0;
+	if (shader) shader->destroy();
 }

@@ -13,6 +13,9 @@
 SlipShader* SlipShader::CreateFromSource(const char* vertexSrc, const char* fragmentSrc)
 {
     if (!vertexSrc || !fragmentSrc) return nullptr;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glCreateShader || !glad_glCreateProgram) return nullptr;
+#endif
 
     int success = 0;
     char infoLog[1024] = { 0 };
@@ -85,6 +88,10 @@ SlipShader* SlipShader::CreateFromSource(const char* vertexSrc, const char* frag
 
 SlipShader::SlipShader(const char* vertexPath, const char* fragmentPath)
 {
+    ID = 0;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glCreateShader || !glad_glCreateProgram) return;
+#endif
     int  success;
     char infoLog[512];
 
@@ -139,6 +146,10 @@ SlipShader::SlipShader(const char* vertexPath, const char* fragmentPath)
 
 SlipShader::SlipShader(const char* vertexPath, const char* fragmentPath, const char* tessellationControlPath, const char* tessellationEvaluationPath)
 {
+    ID = 0;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glCreateShader || !glad_glCreateProgram) return;
+#endif
     int  success;
     char infoLog[512];
 
@@ -221,36 +232,65 @@ SlipShader::SlipShader(const char* vertexPath, const char* fragmentPath, const c
 
 void SlipShader::use()
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glUseProgram) return;
+#endif
     glUseProgram(ID);
 }
 
 void SlipShader::destroy()
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glDeleteProgram) { ID = 0; return; }
+#endif
     glDeleteProgram(ID);
+    ID = 0;
 }
 
 void SlipShader::setBool(const std::string& name, bool value) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform1i) return;
+#endif
     glUniform1i(glGetUniformLocation(ID, name.c_str()), (int)value);
 }
 
 void SlipShader::setInt(const std::string& name, int value) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform1i) return;
+#endif
     glUniform1i(glGetUniformLocation(ID, name.c_str()), value);
 }
 
 void SlipShader::setFloat(const std::string& name, float value) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform1f) return;
+#endif
     glUniform1f(glGetUniformLocation(ID, name.c_str()), value);
 }
 
 void SlipShader::setMat4(const std::string& name, const glm::mat4 &value) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniformMatrix4fv) return;
+#endif
     glUniformMatrix4fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, glm::value_ptr(value));
 }
 
 void SlipShader::setMat4Array(const std::string& name, const glm::mat4* values, int count) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniformMatrix4fv) return;
+#endif
     if (count > 0 && values != nullptr) {
         glUniformMatrix4fv(glGetUniformLocation(ID, name.c_str()), count, GL_FALSE, glm::value_ptr(values[0]));
     }
@@ -258,30 +298,54 @@ void SlipShader::setMat4Array(const std::string& name, const glm::mat4* values, 
 
 void SlipShader::setVec2(const std::string& name, const glm::vec2 &value) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform2fv) return;
+#endif
     glUniform2fv(glGetUniformLocation(ID, name.c_str()), 1, glm::value_ptr(value));
 }
 
 void SlipShader::setVec2(const std::string& name, float x, float y) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform2f) return;
+#endif
     glUniform2f(glGetUniformLocation(ID, name.c_str()), x, y);
 }
 
 void SlipShader::setVec3(const std::string& name, const glm::vec3 &value) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform3fv) return;
+#endif
     glUniform3fv(glGetUniformLocation(ID, name.c_str()), 1, glm::value_ptr(value));
 }
 
 void SlipShader::setVec3(const std::string& name, float x, float y, float z) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform3f) return;
+#endif
     glUniform3f(glGetUniformLocation(ID, name.c_str()), x, y, z);
 }
 
 void SlipShader::setVec4(const std::string& name, const glm::vec4 &value) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform4fv) return;
+#endif
     glUniform4fv(glGetUniformLocation(ID, name.c_str()), 1, glm::value_ptr(value));
 }
 
 void SlipShader::setVec4(const std::string& name, float x, float y, float z, float w) const
 {
+    if (ID == 0) return;
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGetUniformLocation || !glad_glUniform4f) return;
+#endif
     glUniform4f(glGetUniformLocation(ID, name.c_str()), x, y, z, w);
 }

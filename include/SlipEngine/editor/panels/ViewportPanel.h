@@ -109,6 +109,8 @@ private:
     ViewportCameraType m_ActiveCameraType = ViewportCameraType::EditorCamera;
 
     uint32_t m_TextureID = 0;
+    void*    m_VkViewportDescriptor = nullptr;
+    uint64_t m_VkViewportGen = 0;
     glm::vec2 m_ViewportSize = { 0.0f, 0.0f };
     glm::vec2 m_ViewportBounds[2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
     uint32_t m_SavedDockId = 0;

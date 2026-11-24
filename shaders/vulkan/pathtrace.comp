@@ -1,0 +1,724 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(buffer_reference, scalar) readonly buffer FloatBuf { float data[]; };
+layout(buffer_reference, scalar) readonly buffer UintBuf  { uint data[]; };
+
+struct GpuMaterialData {
+    vec4 albedoColor;
+    vec4 emissiveColor;
+    vec4 pbrParams;
+    vec4 extraParams;
+    ivec4 texIndices0;
+    ivec4 texIndices1;
+};
+
+struct GpuRtInstanceInfo {
+    uint64_t vertexAddress;
+    uint64_t indexAddress;
+    uint materialIndex;
+    uint firstIndex;
+    int  vertexOffset;
+    uint vertexStrideFloats;
+    mat4 prevModel;
+};
+
+struct GpuDirLight {
+    vec4 directionIntensity;
+    vec4 colorPad;
+};
+
+struct GpuPointLight {
+    vec4 positionRange;
+    vec4 colorIntensity;
+};
+
+struct GpuSpotLight {
+    vec4 positionRange;
+    vec4 directionCosOuter;
+    vec4 colorIntensityCosIn;
+};
+
+layout(set = 0, binding = 0) uniform sampler2D uTextures[];
+layout(set = 0, binding = 1) readonly buffer MaterialBuffer { GpuMaterialData materials[]; } uMaterials;
+
+layout(set = 1, binding = 0, rgba16f) uniform image2D uPtAccum;      // DiffuseIrradiance (demodulated)
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D uHdrOut;
+layout(set = 1, binding = 2) uniform accelerationStructureEXT uTLAS;
+layout(set = 1, binding = 3) readonly buffer RtInstanceInfoBuffer { GpuRtInstanceInfo rtInstances[]; } uRtInstances;
+layout(set = 1, binding = 4) uniform SceneLightingUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 skyZenith;
+    vec4 skyHorizon;
+    vec4 skyGround;
+    vec4 sunDirIntensity;
+    vec4 sunColorParams;
+    ivec4 counts;
+    GpuDirLight dirLights[4];
+    GpuPointLight pointLights[32];
+    GpuSpotLight spotLights[16];
+    vec4 cloudParams0;
+    vec4 cloudParams1;
+    vec4 cloudParams2;
+    vec4 cloudAmbient;
+    mat4 currViewProj;
+    mat4 prevViewProj;
+} uScene;
+layout(set = 1, binding = 5) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+} uGi;
+layout(set = 1, binding = 6, rgba16f) uniform writeonly image2D uPtNormalRoughOut;
+layout(set = 1, binding = 7, rgba16f) uniform image2D uPtAlbedoOut;
+layout(set = 1, binding = 8, rgba16f) uniform image2D uPtEmissiveOut;
+layout(set = 1, binding = 9, rg32f)   uniform writeonly image2D uPtDepthInstOut;
+layout(set = 1, binding = 10, rg16f)  uniform writeonly image2D uPtMotionOut;
+layout(set = 1, binding = 11, rgba16f) uniform image2D uPtSpecAccum; // SpecularRadiance (NOT divided by diffuse albedo)
+
+const float PI = 3.14159265359;
+
+uint PcgHash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float Rand01(inout uint seed) {
+    seed = PcgHash(seed);
+    return float(seed) * (1.0 / 4294967296.0);
+}
+
+vec2 R2Sequence(uint n, vec2 pixelOffset) {
+    return fract(pixelOffset + vec2(0.7548776662, 0.5698402910) * float(n));
+}
+
+// Spatiotemporal Blue Noise 2D sampler (high-frequency spatial radical-inverse dither + R2 temporal Cranley-Patterson rotation)
+vec2 SampleBlueNoise2D(ivec2 pix, uint sampleIndex, uint dimension) {
+    uvec2 p = uvec2(pix) & 127u;
+    uint h0 = (p.x * 47u + p.y * 97u + (p.x ^ p.y) * 131u) & 255u;
+    uint h1 = (p.x * 73u + p.y * 53u + ((p.x + p.y) ^ (p.x * 3u)) * 179u) & 255u;
+    h0 = ((h0 & 0x55u) << 1u) | ((h0 & 0xAAu) >> 1u);
+    h0 = ((h0 & 0x33u) << 2u) | ((h0 & 0xCCu) >> 2u);
+    h0 = ((h0 & 0x0Fu) << 4u) | ((h0 & 0xF0u) >> 4u);
+    h1 = ((h1 & 0x55u) << 1u) | ((h1 & 0xAAu) >> 1u);
+    h1 = ((h1 & 0x33u) << 2u) | ((h1 & 0xCCu) >> 2u);
+    h1 = ((h1 & 0x0Fu) << 4u) | ((h1 & 0xF0u) >> 4u);
+    vec2 spatialBlue = (vec2(float(h0), float(h1)) + 0.5) * (1.0 / 256.0);
+
+    float t = float(sampleIndex) + float(dimension) * 17.0;
+    vec2 temporalOffset = fract(vec2(0.7548776662, 0.5698402910) * t +
+                                vec2(0.6180339887, 0.3819660112) * float(dimension));
+    return fract(spatialBlue + temporalOffset);
+}
+
+float CloudHash31(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float CloudNoise3D(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float n000 = CloudHash31(i);
+    float n100 = CloudHash31(i + vec3(1.0, 0.0, 0.0));
+    float n010 = CloudHash31(i + vec3(0.0, 1.0, 0.0));
+    float n110 = CloudHash31(i + vec3(1.0, 1.0, 0.0));
+    float n001 = CloudHash31(i + vec3(0.0, 0.0, 1.0));
+    float n101 = CloudHash31(i + vec3(1.0, 0.0, 1.0));
+    float n011 = CloudHash31(i + vec3(0.0, 1.0, 1.0));
+    float n111 = CloudHash31(i + vec3(1.0, 1.0, 1.0));
+
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+}
+
+float CloudFbm3D(vec3 p) {
+    float v = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 4; ++i) {
+        v += amp * CloudNoise3D(p);
+        p = vec3(
+            0.80 * p.x - 0.60 * p.z,
+            1.15 * p.y + 0.27 * p.x,
+            0.60 * p.x + 0.80 * p.z
+        ) * 2.03 + vec3(13.7, 7.3, 19.1);
+        amp *= 0.5;
+    }
+    return v;
+}
+
+float SampleCloudDensity(vec3 pos, float baseH, float thick, float scale, float coverage, float density, float edgeErosion, vec2 windOff) {
+    float hFrac = clamp((pos.y - baseH) / thick, 0.0, 1.0);
+    float hEnv = smoothstep(0.0, 0.16, hFrac) * smoothstep(1.0, 0.34, hFrac);
+    if (hEnv <= 0.001) return 0.0;
+
+    float freq = scale * 6.0;
+    vec3 wind3 = vec3(windOff.x, 0.0, windOff.y) * 6.0;
+    vec3 p = vec3(pos.x * freq, hFrac * 1.85, pos.z * freq) + wind3;
+
+    vec3 warp = vec3(
+        CloudNoise3D(p * 0.43 + vec3(1.7, 9.2, 4.1)),
+        CloudNoise3D(p * 0.39 + vec3(8.3, 2.8, 5.7)),
+        CloudNoise3D(p * 0.47 + vec3(3.1, 6.4, 9.5))
+    ) - 0.5;
+    vec3 q = p + warp * 1.65;
+
+    float fbmMain = CloudFbm3D(q);
+    float billow = 1.0 - abs(CloudNoise3D(q * 1.73 + vec3(5.2, 1.3, 8.8)) * 2.0 - 1.0);
+    float macroBank = CloudNoise3D(vec3(pos.x * freq * 0.23, 0.37, pos.z * freq * 0.29) + wind3 * 0.35);
+
+    float localCov = clamp(coverage + (macroBank - 0.5) * 0.42, 0.02, 0.98);
+    float baseN = mix(fbmMain, billow, 0.30);
+    float threshold = 1.0 - localCov;
+    float baseCloud = clamp((baseN - threshold) / max(1.0 - threshold, 0.02), 0.0, 1.0);
+    if (baseCloud <= 0.0005) return 0.0;
+
+    float detailN = CloudFbm3D(q * 3.4 - wind3 * 0.7);
+    float eroded = clamp((baseCloud - detailN * edgeErosion * 0.55) / max(1.0 - detailN * edgeErosion * 0.55, 0.05), 0.0, 1.0);
+    float crisp = pow(eroded, mix(1.0, 1.4, edgeErosion));
+    return crisp * hEnv * (density * 8.5);
+}
+
+vec3 EvaluateVolumetricClouds(vec3 ro, vec3 rd, vec3 skyCol, float ignJitter) {
+    if (uScene.cloudParams0.x < 0.5 || rd.y <= 0.012) {
+        return skyCol;
+    }
+
+    float coverage = clamp(uScene.cloudParams0.y, 0.0, 1.0);
+    float density = max(uScene.cloudParams0.z, 0.0);
+    if (coverage <= 0.01 || density <= 0.00005) return skyCol;
+
+    float baseH = uScene.cloudParams0.w;
+    float thick = max(uScene.cloudParams1.x, 5.0);
+    float topH = baseH + thick;
+    float tStart = max((baseH - ro.y) / rd.y, 0.0);
+    float tEnd = max((topH - ro.y) / rd.y, tStart);
+    tEnd = min(tEnd, tStart + 7500.0);
+    tEnd = min(tEnd, 18000.0);
+    if (tEnd <= tStart + 0.1) return skyCol;
+
+    float scale = max(uScene.cloudParams1.y, 0.00005);
+    float edgeErosion = clamp(uScene.cloudParams1.z, 0.0, 1.0);
+    float absorption = max(uScene.cloudParams1.w, 0.05);
+    vec2 windOff = uScene.cloudParams2.xy;
+    float g = clamp(uScene.cloudParams2.z, -0.85, 0.85);
+    float powderFactor = max(uScene.cloudParams2.w, 0.1);
+    float silverSpread = max(uScene.cloudAmbient.w, 0.1);
+
+    vec3 sunDir = normalize(uScene.sunDirIntensity.xyz);
+    float cosTheta = dot(rd, sunDir);
+    float hg = (1.0 - g * g) / (4.0 * PI * pow(max(1.0 + g * g - 2.0 * g * cosTheta, 0.02), 1.5));
+    float phase = mix(0.35, hg * 2.1, 0.55);
+    float silver = pow(max(cosTheta, 0.0), 8.0 * silverSpread) * 0.45;
+
+    const int STEPS = 32;
+    float dt = (tEnd - tStart) / float(STEPS);
+    vec3 accumCol = vec3(0.0);
+    float transmittance = 1.0;
+
+    for (int i = 0; i < STEPS; ++i) {
+        float t = tStart + (float(i) + ignJitter) * dt;
+        vec3 pos = ro + rd * t;
+        float d = SampleCloudDensity(pos, baseH, thick, scale, coverage, density, edgeErosion, windOff);
+        if (d > 0.00005) {
+            float hFrac = clamp((pos.y - baseH) / thick, 0.0, 1.0);
+            float sunStep = clamp(thick * 0.12, 12.0, 90.0);
+            float dSun1 = SampleCloudDensity(pos + sunDir * sunStep, baseH, thick, scale, coverage, density, edgeErosion, windOff);
+            float dSun2 = SampleCloudDensity(pos + sunDir * (sunStep * 2.6), baseH, thick, scale, coverage, density, edgeErosion, windOff);
+            float sunTau = (dSun1 + dSun2) * sunStep * absorption;
+            float sunLight = max(exp(-sunTau * 1.1), 0.28 * exp(-sunTau * 0.25));
+
+            float powder = 1.0 - exp(-d * dt * 1.8 * powderFactor);
+            vec3 scatter = uScene.cloudAmbient.rgb * mix(0.68, 1.22, hFrac) +
+                           uScene.sunColorParams.rgb * uScene.sunDirIntensity.w * sunLight * (phase + silver) * (0.72 + 0.50 * powder);
+
+            float stepT = exp(-d * dt * absorption);
+            accumCol += transmittance * scatter * (1.0 - stepT);
+            transmittance *= stepT;
+            if (transmittance < 0.01) break;
+        }
+    }
+
+    float horizonFade = smoothstep(0.012, 0.085, rd.y) * exp(-tStart * 0.00004);
+    vec3 cloudMixed = accumCol + skyCol * transmittance;
+    return mix(skyCol, cloudMixed, horizonFade);
+}
+
+vec3 EvaluateSky(vec3 dir, bool includeSunDisc) {
+    if (uScene.skyZenith.w < 0.5) return vec3(0.08, 0.10, 0.14);
+    float y = dir.y;
+    vec3 col = (y >= 0.0)
+        ? mix(uScene.skyZenith.rgb, uScene.skyHorizon.rgb, pow(clamp(1.0 - y, 0.0, 1.0), max(uScene.skyHorizon.w, 0.1)))
+        : mix(uScene.skyGround.rgb, uScene.skyHorizon.rgb, pow(clamp(1.0 + y, 0.0, 1.0), max(uScene.skyHorizon.w, 0.1)));
+    if (includeSunDisc && uScene.skyGround.w > 0.5) {
+        vec3 sunDir = normalize(uScene.sunDirIntensity.xyz);
+        float cosTheta = max(dot(normalize(dir), sunDir), 0.0);
+        float sunRadius = max(uScene.sunColorParams.w, 0.005);
+        float disc = smoothstep(cos(sunRadius), cos(sunRadius * 0.5), cosTheta);
+        float glow = pow(cosTheta, mix(128.0, 8.0, clamp(float(uScene.counts.w) * 0.001, 0.0, 1.0))) * 0.45;
+        col += uScene.sunColorParams.rgb * uScene.sunDirIntensity.w * (disc * 3.0 + glow);
+    }
+    return col;
+}
+
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float denom = (NdotH * NdotH * (a2 - 1.0) + 1.0);
+    return a2 / max(PI * denom * denom, 1e-5);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotV / max(NdotV * (1.0 - k) + k, 1e-5);
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    return GeometrySchlickGGX(max(dot(N, V), 0.0), roughness) *
+           GeometrySchlickGGX(max(dot(N, L), 0.0), roughness);
+}
+
+vec3 FresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+void EvaluateBRDFSplit(vec3 N, vec3 V, vec3 L, vec3 rad, vec3 albedo, float rough, float metal, out vec3 outDiffIrr, out vec3 outSpecRad) {
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL <= 0.0) {
+        outDiffIrr = vec3(0.0);
+        outSpecRad = vec3(0.0);
+        return;
+    }
+    vec3 H = normalize(V + L);
+    vec3 F0 = mix(vec3(0.04), albedo, metal);
+    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
+    vec3 spec = (DistributionGGX(N, H, rough) * GeometrySmith(N, V, L, rough) * F) /
+                max(4.0 * max(dot(N, V), 0.0) * NdotL, 0.001);
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metal);
+    // Demodulated diffuse irradiance (without multiplying by primary hit albedo)
+    outDiffIrr = (kD / PI) * rad * NdotL;
+    // Specular radiance (includes Fresnel F0, never divided by diffuse albedo)
+    outSpecRad = spec * rad * NdotL;
+}
+
+vec3 EvaluateBRDF(vec3 N, vec3 V, vec3 L, vec3 rad, vec3 albedo, float rough, float metal) {
+    vec3 dIrr, sRad;
+    EvaluateBRDFSplit(N, V, L, rad, albedo, rough, metal, dIrr, sRad);
+    return dIrr * albedo + sRad;
+}
+
+void BuildOrthonormalBasis(vec3 N, out vec3 T, out vec3 B) {
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    T = normalize(cross(up, N));
+    B = cross(N, T);
+}
+
+vec3 SampleCosineHemisphere(vec3 N, float u1, float u2) {
+    float r = sqrt(max(u1, 0.0));
+    float theta = 2.0 * PI * u2;
+    vec3 T, B;
+    BuildOrthonormalBasis(N, T, B);
+    return normalize(T * (r * cos(theta)) + B * (r * sin(theta)) + N * sqrt(max(1.0 - u1, 0.0)));
+}
+
+vec3 SampleGGXHalfVector(vec3 N, float roughness, float u1, float u2) {
+    float a = roughness * roughness;
+    float phi = 2.0 * PI * u1;
+    float cosTheta = sqrt((1.0 - u2) / max(1.0 + (a * a - 1.0) * u2, 1e-5));
+    float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+    vec3 T, B;
+    BuildOrthonormalBasis(N, T, B);
+    return normalize(T * (cos(phi) * sinTheta) + B * (sin(phi) * sinTheta) + N * cosTheta);
+}
+
+bool TraceVisibility(vec3 origin, vec3 dir, float tMin, float tMax) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq,
+        uTLAS,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        0xFFu,
+        origin,
+        tMin,
+        dir,
+        tMax
+    );
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+// Next Event Estimation (NEE) split into Demodulated Diffuse Irradiance and Specular Radiance for primary hit (b == 0)
+void EvaluateDirectNEESplit(vec3 hitPos, vec3 N, vec3 V, vec3 hitAlbedo, float roughness, float metallic, vec2 bnLight, out vec3 outDiffIrr, out vec3 outSpecRad) {
+    outDiffIrr = vec3(0.0);
+    outSpecRad = vec3(0.0);
+
+    int dirCount = clamp(uScene.counts.x, 0, 4);
+    float coneRadius = clamp(uScene.sunColorParams.w * 0.35, 0.004, 0.025);
+    for (int i = 0; i < dirCount; ++i) {
+        vec3 baseL = normalize(-uScene.dirLights[i].directionIntensity.xyz);
+        vec3 L = baseL;
+        if (i == 0 && coneRadius > 0.0001) {
+            vec3 sunT, sunB;
+            BuildOrthonormalBasis(baseL, sunT, sunB);
+            float rDisk = sqrt(max(bnLight.x, 0.0)) * coneRadius;
+            float phiDisk = 2.0 * PI * bnLight.y;
+            vec3 jitterL = normalize(baseL + (sunT * cos(phiDisk) + sunB * sin(phiDisk)) * rDisk);
+            if (dot(N, jitterL) > 0.0) L = jitterL;
+        }
+        if (dot(N, L) > 0.0 && TraceVisibility(hitPos + N * 0.004, L, 0.002, 500.0)) {
+            vec3 rad = uScene.dirLights[i].colorPad.rgb * uScene.dirLights[i].directionIntensity.w;
+            vec3 dI, sR;
+            EvaluateBRDFSplit(N, V, L, rad, hitAlbedo, roughness, metallic, dI, sR);
+            outDiffIrr += dI;
+            outSpecRad += sR;
+        }
+    }
+
+    int ptCount = clamp(uScene.counts.y, 0, 32);
+    for (int i = 0; i < ptCount; ++i) {
+        vec3 toL = uScene.pointLights[i].positionRange.xyz - hitPos;
+        float dist = length(toL);
+        float range = max(uScene.pointLights[i].positionRange.w, 0.001);
+        if (dist < range) {
+            vec3 L = toL / max(dist, 1e-4);
+            if (dot(N, L) > 0.0 && TraceVisibility(hitPos + N * 0.004, L, 0.002, max(dist - 0.01, 0.003))) {
+                float att = clamp(1.0 - (dist / range), 0.0, 1.0);
+                att = (att * att) / (1.0 + 0.1 * dist * dist);
+                vec3 rad = uScene.pointLights[i].colorIntensity.rgb * uScene.pointLights[i].colorIntensity.w * att;
+                vec3 dI, sR;
+                EvaluateBRDFSplit(N, V, L, rad, hitAlbedo, roughness, metallic, dI, sR);
+                outDiffIrr += dI;
+                outSpecRad += sR;
+            }
+        }
+    }
+
+    int spCount = clamp(uScene.counts.z, 0, 16);
+    for (int i = 0; i < spCount; ++i) {
+        vec3 toL = uScene.spotLights[i].positionRange.xyz - hitPos;
+        float dist = length(toL);
+        float range = max(uScene.spotLights[i].positionRange.w, 0.001);
+        if (dist < range) {
+            vec3 L = toL / max(dist, 1e-4);
+            float theta = dot(-L, normalize(uScene.spotLights[i].directionCosOuter.xyz));
+            float cosOut = uScene.spotLights[i].directionCosOuter.w;
+            float spot = clamp((theta - cosOut) / max(mix(cosOut, 1.0, 0.35) - cosOut, 0.001), 0.0, 1.0);
+            if (spot > 0.0 && dot(N, L) > 0.0 && TraceVisibility(hitPos + N * 0.004, L, 0.002, max(dist - 0.01, 0.003))) {
+                float att = clamp(1.0 - (dist / range), 0.0, 1.0);
+                att = (att * att) / (1.0 + 0.1 * dist * dist);
+                vec3 rad = uScene.spotLights[i].colorIntensityCosIn.rgb * uScene.spotLights[i].colorIntensityCosIn.w * att * spot;
+                vec3 dI, sR;
+                EvaluateBRDFSplit(N, V, L, rad, hitAlbedo, roughness, metallic, dI, sR);
+                outDiffIrr += dI;
+                outSpecRad += sR;
+            }
+        }
+    }
+}
+
+vec3 EvaluateDirectNEE(vec3 hitPos, vec3 N, vec3 V, vec3 hitAlbedo, float roughness, float metallic, vec2 bnLight) {
+    vec3 dI, sR;
+    EvaluateDirectNEESplit(hitPos, N, V, hitAlbedo, roughness, metallic, bnLight, dI, sR);
+    return dI * hitAlbedo + sR;
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uPtAccum);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    if (uGi.giMode == 3 && uGi.sampleCount > 0u) {
+        return;
+    }
+
+    const bool isRealtimeSvgf = (uGi.giMode == 4);
+    uint spp = uint(clamp(uGi.giRaysPerPixel, 1, isRealtimeSvgf ? 2 : 4));
+    int maxBounces = clamp(uGi.giBounces, 1, 8);
+
+    vec3 accumDiffIrr = vec3(0.0);
+    vec3 accumSpecRad = vec3(0.0);
+    vec3 accumAlbedo = vec3(0.0);
+    vec3 accumEmissive = vec3(0.0);
+    vec3 primaryNormalOut = vec3(0.0);
+    float primaryRoughnessOut = 1.0;
+    float primaryMetallicOut = 0.0;
+    float primaryLinearDepthOut = 0.0;
+    float primaryInstIdOut = 0.0;
+    vec2 primaryMotion2DOut = vec2(0.0);
+
+    for (uint sIdx = 0u; sIdx < spp; ++sIdx) {
+        uint seqIndex = (max(uGi.frameIndex, 1u) - 1u) * spp + sIdx;
+        vec2 bnPrimary = SampleBlueNoise2D(pix, seqIndex, 0u);
+        // In Realtime SVGF mode keep primary ray centered at pixel (0.5) for sharp G-Buffer / Albedo demodulation alignment
+        vec2 jitter = (!isRealtimeSvgf && (uGi.sampleCount > 1u || spp > 1u)) ? bnPrimary : vec2(0.5);
+        vec2 uv = (vec2(pix) + jitter) / vec2(size);
+        vec2 ndc = uv * 2.0 - 1.0;
+
+        vec4 farW = uScene.invViewProj * vec4(ndc, 1.0, 1.0);
+        vec3 ro = uScene.cameraPos.xyz;
+        vec3 rd = normalize(farW.xyz / max(abs(farW.w), 1e-6) - ro);
+
+        float ign = bnPrimary.x;
+        vec3 sampleDiffIrr = vec3(0.0);
+        vec3 sampleSpecRad = vec3(0.0);
+        vec3 primaryAlbedo = vec3(1.0);
+        vec3 primaryEmis = vec3(0.0);
+
+        if (uGi.hasValidTLAS == 0) {
+            vec3 skyCol = EvaluateSky(rd, true);
+            primaryEmis = EvaluateVolumetricClouds(ro, rd, skyCol, ign);
+        } else {
+            vec3 throughput = vec3(1.0);
+            bool firstBounceIsSpecular = false;
+
+            for (int b = 0; b < maxBounces; ++b) {
+                rayQueryEXT rq;
+                rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT, 0xFFu, ro, 0.001, rd, 500.0);
+                while (rayQueryProceedEXT(rq)) {}
+
+                if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+                    vec3 skyCol = EvaluateSky(rd, b == 0 || (b == 1 && firstBounceIsSpecular));
+                    if (b == 0) {
+                        skyCol = EvaluateVolumetricClouds(ro, rd, skyCol, ign);
+                        primaryEmis = skyCol;
+                    } else {
+                        if (b == 1 && firstBounceIsSpecular) {
+                            skyCol = EvaluateVolumetricClouds(ro, rd, skyCol, ign);
+                        }
+                        if (firstBounceIsSpecular) {
+                            sampleSpecRad += throughput * skyCol;
+                        } else {
+                            sampleDiffIrr += throughput * skyCol;
+                        }
+                    }
+                    break;
+                }
+
+                float tHit = rayQueryGetIntersectionTEXT(rq, true);
+                uint instIdx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+                uint primIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+                vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+                vec3 w = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
+
+                GpuRtInstanceInfo info = uRtInstances.rtInstances[instIdx];
+                UintBuf idxBuf = UintBuf(info.indexAddress);
+                FloatBuf vBuf = FloatBuf(info.vertexAddress);
+
+                uint i0 = idxBuf.data[info.firstIndex + primIdx * 3u + 0u] + uint(info.vertexOffset);
+                uint i1 = idxBuf.data[info.firstIndex + primIdx * 3u + 1u] + uint(info.vertexOffset);
+                uint i2 = idxBuf.data[info.firstIndex + primIdx * 3u + 2u] + uint(info.vertexOffset);
+
+                uint stride = info.vertexStrideFloats;
+                uint b0 = i0 * stride;
+                uint b1 = i1 * stride;
+                uint b2 = i2 * stride;
+
+                vec3 n0 = vec3(vBuf.data[b0 + 3u], vBuf.data[b0 + 4u], vBuf.data[b0 + 5u]);
+                vec3 n1 = vec3(vBuf.data[b1 + 3u], vBuf.data[b1 + 4u], vBuf.data[b1 + 5u]);
+                vec3 n2 = vec3(vBuf.data[b2 + 3u], vBuf.data[b2 + 4u], vBuf.data[b2 + 5u]);
+                vec2 uv0 = vec2(vBuf.data[b0 + 6u], vBuf.data[b0 + 7u]);
+                vec2 uv1 = vec2(vBuf.data[b1 + 6u], vBuf.data[b1 + 7u]);
+                vec2 uv2 = vec2(vBuf.data[b2 + 6u], vBuf.data[b2 + 7u]);
+
+                vec3 localN = normalize(n0 * w.x + n1 * w.y + n2 * w.z);
+                mat4x3 worldToObj = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
+                vec3 N = normalize(transpose(mat3(worldToObj)) * localN);
+                if (dot(N, -rd) < 0.0) N = -N;
+
+                vec2 hitUv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
+                vec3 hitPos = ro + rd * tHit;
+                vec3 V = -rd;
+
+                GpuMaterialData mat = uMaterials.materials[info.materialIndex];
+                vec3 hitAlbedo = mat.albedoColor.rgb;
+                if (mat.texIndices0.x >= 0) {
+                    hitAlbedo *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.x)], hitUv, 0.0).rgb;
+                }
+                hitAlbedo = pow(clamp(hitAlbedo, vec3(0.0), vec3(1.0)), vec3(2.2));
+
+                float roughness = clamp(mat.pbrParams.x, 0.04, 1.0);
+                if (mat.texIndices0.z >= 0) {
+                    roughness *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.z)], hitUv, 0.0).g;
+                }
+                if (mat.extraParams.z > 0.5) roughness = 1.0 - roughness;
+                roughness = clamp(roughness, 0.04, 1.0);
+
+                float metallic = clamp(mat.pbrParams.y, 0.0, 1.0);
+                if (mat.texIndices0.w >= 0) {
+                    metallic *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.w)], hitUv, 0.0).b;
+                }
+                metallic = clamp(metallic, 0.0, 1.0);
+
+                vec3 hitEmissive = mat.emissiveColor.rgb * mat.emissiveColor.a;
+                if (mat.texIndices1.y >= 0) {
+                    hitEmissive *= textureLod(uTextures[nonuniformEXT(mat.texIndices1.y)], hitUv, 0.0).rgb;
+                }
+
+                vec3 F0 = mix(vec3(0.04), hitAlbedo, metallic);
+                if (b == 0) {
+                    // Store original primary hit albedo intact in G-Buffer (never filtered)
+                    primaryAlbedo = max(hitAlbedo, vec3(0.02));
+                    primaryEmis = hitEmissive;
+                    if (sIdx == 0u) {
+                        primaryNormalOut = N;
+                        primaryRoughnessOut = roughness;
+                        primaryMetallicOut = metallic;
+                        primaryLinearDepthOut = tHit;
+                        primaryInstIdOut = float(instIdx + 1u);
+
+                        // Compute 2D Motion Vector (currViewProj vs prevViewProj + per-instance prevModel)
+                        vec3 p0 = vec3(vBuf.data[b0 + 0u], vBuf.data[b0 + 1u], vBuf.data[b0 + 2u]);
+                        vec3 p1 = vec3(vBuf.data[b1 + 0u], vBuf.data[b1 + 1u], vBuf.data[b1 + 2u]);
+                        vec3 p2 = vec3(vBuf.data[b2 + 0u], vBuf.data[b2 + 1u], vBuf.data[b2 + 2u]);
+                        vec3 localPos = p0 * w.x + p1 * w.y + p2 * w.z;
+                        vec3 prevWorldPos = (info.prevModel * vec4(localPos, 1.0)).xyz;
+                        vec4 currClip = uScene.currViewProj * vec4(hitPos, 1.0);
+                        vec4 prevClip = uScene.prevViewProj * vec4(prevWorldPos, 1.0);
+                        vec2 currUv = (currClip.xy / max(abs(currClip.w), 1e-6)) * 0.5 + 0.5;
+                        vec2 prevUv = (prevClip.xy / max(abs(prevClip.w), 1e-6)) * 0.5 + 0.5;
+                        primaryMotion2DOut = currUv - prevUv;
+                    }
+                } else {
+                    if (firstBounceIsSpecular) {
+                        sampleSpecRad += throughput * hitEmissive;
+                    } else {
+                        sampleDiffIrr += throughput * hitEmissive;
+                    }
+                }
+
+                // Spatiotemporal Blue Noise samples for NEE, lobe selection, and BSDF direction at bounce b
+                uint dimBase = 1u + uint(b) * 3u;
+                vec2 bnLight = SampleBlueNoise2D(pix, seqIndex, dimBase + 0u);
+                vec2 bnLobe  = SampleBlueNoise2D(pix, seqIndex, dimBase + 1u);
+                vec2 bnDir   = SampleBlueNoise2D(pix, seqIndex, dimBase + 2u);
+
+                // Direct NEE at bounce b: split into Demodulated Diffuse and Specular on primary hit (b == 0)
+                if (b == 0) {
+                    vec3 directDiffIrr, directSpecRad;
+                    EvaluateDirectNEESplit(hitPos, N, V, hitAlbedo, roughness, metallic, bnLight, directDiffIrr, directSpecRad);
+                    sampleDiffIrr += directDiffIrr;
+                    sampleSpecRad += directSpecRad;
+                } else {
+                    vec3 neeRad = EvaluateDirectNEE(hitPos, N, V, hitAlbedo, roughness, metallic, bnLight);
+                    if (firstBounceIsSpecular) {
+                        sampleSpecRad += throughput * neeRad;
+                    } else {
+                        sampleDiffIrr += throughput * neeRad;
+                    }
+                }
+
+                float specProb = clamp(mix(0.25, 0.90, metallic) + (1.0 - roughness) * 0.35, 0.10, 0.95);
+                // In Realtime SVGF at 2 SPP, stratify lobe selection on b == 0 for non-pure-diffuse/non-pure-mirror surfaces
+                bool chooseSpec = (bnLobe.x < specProb);
+                if (isRealtimeSvgf && b == 0 && spp == 2u && specProb > 0.15 && specProb < 0.88 && metallic < 0.95) {
+                    chooseSpec = (((sIdx + uint(pix.x + pix.y) + uGi.frameIndex) & 1u) == 0u);
+                    specProb = 0.5;
+                }
+
+                vec3 nextDir;
+                vec3 bounceWeight;
+
+                if (chooseSpec) {
+                    if (b == 0) firstBounceIsSpecular = true;
+                    vec3 H = (roughness < 0.055) ? N : SampleGGXHalfVector(N, roughness, bnDir.x, bnDir.y);
+                    nextDir = reflect(-V, H);
+                    if (dot(N, nextDir) <= 0.0) break;
+                    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
+                    float G = GeometrySmith(N, V, nextDir, roughness);
+                    float NdotV = max(dot(N, V), 0.001);
+                    float NdotH = max(dot(N, H), 0.001);
+                    float VdotH = max(dot(V, H), 0.001);
+                    // Specular throughput includes F (with F0) and is NEVER divided by diffuse albedo
+                    bounceWeight = (F * G * VdotH) / max(NdotV * NdotH * specProb, 1e-4);
+                } else {
+                    if (b == 0) firstBounceIsSpecular = false;
+                    nextDir = SampleCosineHemisphere(N, bnDir.x, bnDir.y);
+                    vec3 F = FresnelSchlick(max(dot(N, V), 0.0), F0);
+                    // On primary hit (b == 0), diffuse bounce weight is demodulated (does NOT multiply by hitAlbedo)
+                    vec3 diffBase = (b == 0) ? vec3(1.0) : hitAlbedo;
+                    bounceWeight = (vec3(1.0) - F) * (1.0 - metallic) * diffBase / max(1.0 - specProb, 1e-4);
+                }
+
+                float giScale = (b == 0) ? (firstBounceIsSpecular ? 1.0 : max(uGi.giIntensity, 0.0)) : 1.0;
+                throughput *= bounceWeight * giScale;
+
+                if (b >= 2) {
+                    float pSurvive = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+                    if (bnLobe.y > pSurvive) break;
+                    throughput /= pSurvive;
+                }
+
+                ro = hitPos + N * 0.004;
+                rd = nextDir;
+            }
+        }
+
+        sampleDiffIrr = min(max(sampleDiffIrr, vec3(0.0)), vec3(24.0));
+        sampleSpecRad = min(max(sampleSpecRad, vec3(0.0)), vec3(24.0));
+        if (!any(isnan(sampleDiffIrr)) && !any(isinf(sampleDiffIrr)) &&
+            !any(isnan(sampleSpecRad)) && !any(isinf(sampleSpecRad)))
+        {
+            accumDiffIrr  += sampleDiffIrr;
+            accumSpecRad  += sampleSpecRad;
+            accumAlbedo   += primaryAlbedo;
+            accumEmissive += min(max(primaryEmis, vec3(0.0)), vec3(16.0));
+        }
+    }
+
+    float invSpp = 1.0 / float(spp);
+    vec3 frameDiffIrr  = accumDiffIrr * invSpp;
+    vec3 frameSpecRad  = accumSpecRad * invSpp;
+    vec3 frameAlbedo   = accumAlbedo * invSpp;
+    vec3 frameEmissive = accumEmissive * invSpp;
+
+    vec3 outDiffIrr  = frameDiffIrr;
+    vec3 outSpecRad  = frameSpecRad;
+    vec3 outAlbedo   = frameAlbedo;
+    vec3 outEmissive = frameEmissive;
+
+    if (!isRealtimeSvgf && uGi.sampleCount > 1u) {
+        float blend = 1.0 / float(uGi.sampleCount);
+        outDiffIrr  = mix(imageLoad(uPtAccum, pix).rgb, frameDiffIrr, blend);
+        outSpecRad  = mix(imageLoad(uPtSpecAccum, pix).rgb, frameSpecRad, blend);
+        outAlbedo   = mix(imageLoad(uPtAlbedoOut, pix).rgb, frameAlbedo, blend);
+        outEmissive = mix(imageLoad(uPtEmissiveOut, pix).rgb, frameEmissive, blend);
+    }
+
+    imageStore(uPtNormalRoughOut, pix, vec4(primaryNormalOut, primaryRoughnessOut));
+    imageStore(uPtAlbedoOut, pix, vec4(outAlbedo, primaryMetallicOut));
+    imageStore(uPtEmissiveOut, pix, vec4(outEmissive, 1.0));
+    imageStore(uPtDepthInstOut, pix, vec4(primaryLinearDepthOut, primaryInstIdOut, 0.0, 0.0));
+    imageStore(uPtMotionOut, pix, vec4(primaryMotion2DOut, 0.0, 0.0));
+    imageStore(uPtAccum, pix, vec4(outDiffIrr, 1.0));
+    imageStore(uPtSpecAccum, pix, vec4(outSpecRad, 1.0));
+    imageStore(uHdrOut, pix, vec4(outDiffIrr * outAlbedo + outSpecRad + outEmissive, 1.0));
+}

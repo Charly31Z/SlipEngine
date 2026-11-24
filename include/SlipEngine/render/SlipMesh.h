@@ -133,6 +133,9 @@ public:
 
     void draw(glm::mat4 transform, SlipMaterial* overrideMaterial = nullptr, bool bindMaterial = true);
     void clean();
+
+    const std::vector<Vertex>& GetUnifiedVertices() const { return m_UnifiedVertices; }
+    const std::vector<uint32_t>& GetUnifiedIndices() const { return m_UnifiedIndices; }
 private:
     std::vector<Vertex> m_UnifiedVertices;
     std::vector<uint32_t> m_UnifiedIndices;

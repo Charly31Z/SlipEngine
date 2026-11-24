@@ -1,0 +1,49 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uBloomIn;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D uBloomOut;
+layout(set = 0, binding = 2) uniform PostProcessUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 sunDir;
+    vec4 sunColor;
+    vec4 bloomParams;
+    vec4 bloomTint;
+    vec4 lensParams;
+    vec4 colorParams;
+    vec4 lift;
+    vec4 gamma;
+    vec4 gain;
+    vec4 colorFilter;
+    vec4 radialLetterbox;
+    vec4 fogParams0;
+    vec4 fogParams1;
+    vec4 fogColor;
+    ivec4 flags;
+} uPost;
+
+layout(push_constant) uniform BlurPC {
+    ivec2 dir;
+} pc;
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uBloomOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    float spread = clamp(max(uPost.bloomTint.w, 0.25), 0.25, 2.5) * 1.5;
+    vec2 invSize = 1.0 / vec2(size);
+    vec2 uv = (vec2(pix) + 0.5) * invSize;
+    vec2 stepUv = vec2(pc.dir) * invSize * spread;
+
+    const float w[5] = float[5](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    vec3 res = textureLod(uBloomIn, uv, 0.0).rgb * w[0];
+    for (int i = 1; i < 5; ++i) {
+        vec2 off = stepUv * float(i);
+        res += textureLod(uBloomIn, clamp(uv + off, vec2(0.0), vec2(1.0)), 0.0).rgb * w[i];
+        res += textureLod(uBloomIn, clamp(uv - off, vec2(0.0), vec2(1.0)), 0.0).rgb * w[i];
+    }
+    if (any(isnan(res)) || any(isinf(res))) res = vec3(0.0);
+    imageStore(uBloomOut, pix, vec4(max(res, vec3(0.0)), 1.0));
+}

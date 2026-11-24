@@ -17,6 +17,9 @@ SlipTerrain::~SlipTerrain()
 
 void SlipTerrain::apply()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenVertexArrays) return;
+#endif
     if (initialized)
     {
         glActiveTexture(GL_TEXTURE0);
@@ -82,6 +85,9 @@ void SlipTerrain::apply()
 
 void SlipTerrain::init()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glGenVertexArrays) return;
+#endif
     glGenTextures(1, &texture);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture); // all upcoming GL_TEXTURE_2D operations now have effect on this texture object
@@ -164,6 +170,9 @@ void SlipTerrain::init()
 
 void SlipTerrain::draw()
 {
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glBindVertexArray) return;
+#endif
     glDisable(GL_CULL_FACE);
 
     shader->use();
@@ -190,8 +199,14 @@ void SlipTerrain::draw()
 void SlipTerrain::clean()
 {
     initialized = false;
-
-    glDeleteVertexArrays(1, &terrainVAO);
-    glDeleteBuffers(1, &terrainVBO);
-    glDeleteTextures(1, &texture);
+#if !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (!glad_glDeleteVertexArrays) {
+        terrainVAO = terrainVBO = texture = 0;
+        return;
+    }
+#endif
+    if (terrainVAO != 0) glDeleteVertexArrays(1, &terrainVAO);
+    if (terrainVBO != 0) glDeleteBuffers(1, &terrainVBO);
+    if (texture != 0) glDeleteTextures(1, &texture);
+    terrainVAO = terrainVBO = texture = 0;
 }

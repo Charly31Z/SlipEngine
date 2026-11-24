@@ -4,10 +4,24 @@
 #define SLIP_GRAPHICS_SETTINGS_H
 
 #include "SlipEngine/core/SlipExport.h"
+#include "SlipEngine/render/rhi/SlipRHI.h"
 #include <string>
 #include <glm/glm.hpp>
 
+enum class GlobalIlluminationMode : int {
+    Off = 0,
+    RTGI = 1,
+    PathTracing = 2
+};
+
+enum class PathTracingMode : int {
+    Progressive = 0,
+    RealtimeSVGF = 1
+};
+
 struct SLIPENGINE_API GraphicsSettingsData {
+    SlipGraphicsAPI graphicsAPI = SlipGraphicsAPI::OpenGL;
+
     bool shadowsEnabled = true;
     int shadowResolution = 2048;      // 1024, 2048, 4096
     int cascadeCount = 4;             // 2, 3, 4
@@ -20,15 +34,22 @@ struct SLIPENGINE_API GraphicsSettingsData {
     bool fxAAEnabled = true;
     int fxAAQuality = 1;              // 0 = Off, 1 = Estándar, 2 = Ultra
 
-    // DDGI (solo tiene efecto en PC; Android ignora estos valores)
-    bool ddgiEnabled = true;
-    bool ddgiCameraVolume = true;
-    float ddgiSpacing = 2.0f;         // Espaciado más denso por defecto (2.0m en vez de 3.0m)
-    int ddgiProbesPerFrame = 256;     // Mayor tasa de actualización para alta densidad
-    int ddgiRaysPerProbe = 64;
-    float ddgiHysteresis = 0.78f;
-    float ddgiIntensity = 1.0f;
-    bool ddgiShowProbes = false;
+    // Iluminación Global por Hardware Ray Tracing (Vulkan VK_KHR_ray_query)
+    GlobalIlluminationMode giMode = GlobalIlluminationMode::RTGI;
+    PathTracingMode ptMode = PathTracingMode::Progressive; // Progresivo vs Tiempo Real (SVGF)
+    int giBounces = 2;                // 1..8
+    int giRaysPerPixel = 2;           // 1..4 (SPP/frame en PathTracing)
+    float giIntensity = 1.0f;         // 0.0..4.0
+    bool giDenoiserEnabled = true;    // Denoiser temporal/espacial para RTGI y Path Tracing
+    float giTemporalAlpha = 0.08f;    // Mezcla temporal en RTGI/SVGF (menor = más estable)
+    bool giRayTracedShadows = true;   // Sombras por ray query en RTGI
+    int ptMaxSamples = 256;           // Máximo de muestras en Path Tracing (0 = ilimitado)
+
+    // Calibración en vivo del Denoiser SVGF (Path Tracing en Tiempo Real)
+    int svgfAtrousIterations = 3;     // 1..5 (default 3 para preservar sombras de contacto)
+    float svgfSigmaLuminance = 2.0f;  // 0.5..5.0 (default 2.0 para respetar bordes de sombra)
+    float svgfSigmaNormal = 128.0f;   // 16..256 (default 128.0 para no mezclar caras iluminadas/sombra)
+    float svgfSigmaDepth = 1.5f;      // 0.5..4.0 (default 1.5 para penalizar saltos de profundidad)
 
     // SSR (Screen Space Reflections)
     bool ssrEnabled = true;

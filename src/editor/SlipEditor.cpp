@@ -38,6 +38,10 @@
 #include <imgui_internal.h>
 #include "imgui_impl_sdl2.h"
 #include <imgui_impl_opengl3.h>
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    #include "SlipEngine/render/vulkan/VulkanRHI.h"
+    #include <imgui_impl_vulkan.h>
+#endif
 #include <SDL2/SDL.h>
 
 SlipEditor::SlipEditor() {
@@ -99,27 +103,32 @@ ViewportPanel* SlipEditor::GetViewportPanel() const {
 }
 
 bool SlipEditor::Init(SlipWindow& window) {
-    return Init(window.getWindow(), window.getGLContext());
+    return Init(window.getWindow(), window.getGLContext(), window.getGraphicsAPI());
 }
 
-bool SlipEditor::Init(SDL_Window* window, SDL_GLContext glContext) {
+bool SlipEditor::Init(SDL_Window* window, SDL_GLContext glContext, GraphicsAPI api) {
     if (m_Initialized) {
         return true;
     }
 
     m_Window = window;
     m_GLContext = glContext;
+    m_GraphicsAPI = api;
 
 #if !defined(SLIP_PLATFORM_ANDROID)
-    // Cargar punteros de OpenGL (GLAD) en este módulo (.exe)
-    if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
-        return false;
+    if (m_GraphicsAPI == GraphicsAPI::OpenGL) {
+        // Cargar punteros de OpenGL (GLAD) en este módulo (.exe)
+        if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
+            return false;
+        }
     }
 #endif
 
     // Inicializar subsistemas del motor para el Editor
     SlipPhysics::Get();
-    SlipShaderLibrary::Reset();
+    if (m_GraphicsAPI == GraphicsAPI::OpenGL) {
+        SlipShaderLibrary::Reset();
+    }
 
     // Registrar callback de bakeado automático en demanda para mallas en SlipMesh
     SlipMesh::SetBakeCallback([](const std::string& modelPath, std::string& outCache) -> bool {
@@ -185,12 +194,47 @@ bool SlipEditor::Init(SDL_Window* window, SDL_GLContext glContext) {
     style.ScrollbarSize = 30.0f; // Barras de scroll más gruesas
 #endif
 
-    ImGui_ImplSDL2_InitForOpenGL(window, glContext);
-#if defined(SLIP_PLATFORM_ANDROID)
-    ImGui_ImplOpenGL3_Init("#version 300 es");
-#else
-    ImGui_ImplOpenGL3_Init("#version 330");
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan) {
+        VulkanRHI* vkRhi = dynamic_cast<VulkanRHI*>(SlipRHI::Get());
+        if (!vkRhi) {
+            return false;
+        }
+        ImGui_ImplSDL2_InitForVulkan(window);
+        ImGui_ImplVulkan_LoadFunctions(
+            VK_API_VERSION_1_3,
+            [](const char* fnName, void* userData) -> PFN_vkVoidFunction {
+                return static_cast<VulkanRHI*>(userData)->LoadInstanceFunction(fnName);
+            },
+            vkRhi
+        );
+
+        ImGui_ImplVulkan_InitInfo initInfo{};
+        initInfo.ApiVersion = VK_API_VERSION_1_3;
+        initInfo.Instance = vkRhi->GetInstance();
+        initInfo.PhysicalDevice = vkRhi->GetPhysicalDevice();
+        initInfo.Device = vkRhi->GetDevice();
+        initInfo.QueueFamily = vkRhi->GetGraphicsQueueFamily();
+        initInfo.Queue = vkRhi->GetGraphicsQueue();
+        initInfo.DescriptorPool = vkRhi->GetDescriptorPool();
+        initInfo.MinImageCount = vkRhi->GetSwapchainImageCount();
+        initInfo.ImageCount = vkRhi->GetSwapchainImageCount();
+        initInfo.PipelineInfoMain.RenderPass = vkRhi->GetSwapchainRenderPass();
+        initInfo.PipelineInfoMain.Subpass = 0;
+        initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+        if (!ImGui_ImplVulkan_Init(&initInfo)) {
+            return false;
+        }
+    } else
 #endif
+    {
+        ImGui_ImplSDL2_InitForOpenGL(window, glContext);
+#if defined(SLIP_PLATFORM_ANDROID)
+        ImGui_ImplOpenGL3_Init("#version 300 es");
+#else
+        ImGui_ImplOpenGL3_Init("#version 330");
+#endif
+    }
 
     m_Initialized = true;
 
@@ -273,7 +317,14 @@ void SlipEditor::BeginFrame() {
     SlipInput::BeginFrame();
     SlipInputMap::Get().BeginTouchFrame();
     SlipModelExtract::UpdateTasks();
-    ImGui_ImplOpenGL3_NewFrame();
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan) {
+        ImGui_ImplVulkan_NewFrame();
+    } else
+#endif
+    {
+        ImGui_ImplOpenGL3_NewFrame();
+    }
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     {
@@ -418,7 +469,20 @@ void SlipEditor::RenderPanels() {
 
 void SlipEditor::EndFrame() {
     ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan) {
+        if (VulkanRHI* vkRhi = dynamic_cast<VulkanRHI*>(SlipRHI::Get())) {
+            vkRhi->BeginSwapchainPass();
+            VkCommandBuffer cmd = vkRhi->GetCurrentCommandBuffer();
+            if (cmd != VK_NULL_HANDLE) {
+                ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+            }
+        }
+    } else
+#endif
+    {
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
     ResetTouchGesture();
 
     if (m_ActiveLevel && m_ActiveLevel->HasPendingSceneLoad()) {
@@ -440,9 +504,20 @@ void SlipEditor::Shutdown() {
 
     SlipModelExtract::Shutdown();
 
-    m_Panels.clear();
-    SlipShaderLibrary::Reset();
-    ImGui_ImplOpenGL3_Shutdown();
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (m_GraphicsAPI == GraphicsAPI::Vulkan) {
+        if (ISlipRHI* rhi = SlipRHI::Get()) {
+            rhi->WaitIdle();
+        }
+        m_Panels.clear();
+        ImGui_ImplVulkan_Shutdown();
+    } else
+#endif
+    {
+        m_Panels.clear();
+        SlipShaderLibrary::Reset();
+        ImGui_ImplOpenGL3_Shutdown();
+    }
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
     m_Initialized = false;
@@ -985,6 +1060,13 @@ void SlipEditor::ExecuteLoadScene(const std::string& scenePath) {
     } else {
         m_ActiveLevel->ClearLevel();
     }
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (SlipRHI::GetActiveAPI() == GraphicsAPI::Vulkan) {
+        if (auto* vkRhi = dynamic_cast<VulkanRHI*>(SlipRHI::Get())) {
+            vkRhi->InvalidateSceneCache();
+        }
+    }
+#endif
     m_SelectedEntity = nullptr;
     m_Selection.clear();
     m_CutEntities.clear();
@@ -992,11 +1074,13 @@ void SlipEditor::ExecuteLoadScene(const std::string& scenePath) {
         panel->SetSelectedEntity(nullptr);
     }
     m_ActiveLevel->LoadScene(scenePath);
-    SlipLightBaker::Get().LoadBakedLightmap(m_ActiveLevel);
-    SlipProject::Get().SetCurrentScenePath(scenePath);
-    if (GetViewportPanel()) {
-        GetViewportPanel()->RequestReflectionBake();
+    if (SlipRHI::GetActiveAPI() != GraphicsAPI::Vulkan) {
+        SlipLightBaker::Get().LoadBakedLightmap(m_ActiveLevel);
+        if (GetViewportPanel()) {
+            GetViewportPanel()->RequestReflectionBake();
+        }
     }
+    SlipProject::Get().SetCurrentScenePath(scenePath);
 }
 
 void SlipEditor::StartPlayMode() {
@@ -1107,6 +1191,13 @@ void SlipEditor::StopPlayMode() {
     if (m_ActiveLevel) {
         m_ActiveLevel->ClearLevel();
     }
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+    if (SlipRHI::GetActiveAPI() == GraphicsAPI::Vulkan) {
+        if (auto* vkRhi = dynamic_cast<VulkanRHI*>(SlipRHI::Get())) {
+            vkRhi->InvalidateSceneCache();
+        }
+    }
+#endif
 
     // 3. Limpiar el mundo de físicas de Bullet
     SlipPhysics::Get().clean();
