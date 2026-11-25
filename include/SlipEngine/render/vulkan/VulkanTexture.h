@@ -29,7 +29,8 @@ public:
         VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         bool createSampler = true,
         VkFilter filter = VK_FILTER_LINEAR,
-        VkSamplerAddressMode addressMode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+        VkSamplerAddressMode addressMode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        uint32_t mipLevels = 1
     );
 
     bool CreateFromRGBA8(
@@ -68,6 +69,7 @@ private:
     VkFormat m_Format = VK_FORMAT_UNDEFINED;
     uint32_t m_Width = 0;
     uint32_t m_Height = 0;
+    uint32_t m_MipLevels = 1;
 };
 
 #endif // !SLIP_VULKAN_TEXTURE_H

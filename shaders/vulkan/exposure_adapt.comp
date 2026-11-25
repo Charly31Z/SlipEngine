@@ -1,0 +1,73 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uHdrIn;
+layout(set = 0, binding = 1) buffer ExposureState {
+    float adaptedLum;
+    float exposureMul;
+    float pad0;
+    float pad1;
+} uExposure;
+layout(set = 0, binding = 2) uniform sampler2D uBloomTex;
+layout(set = 0, binding = 3) uniform PostProcessUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 sunDir;
+    vec4 sunColor;
+    vec4 bloomParams;
+    vec4 bloomTint;
+    vec4 lensParams;
+    vec4 colorParams;
+    vec4 lift;
+    vec4 gamma;
+    vec4 gain;
+    vec4 colorFilter;
+    vec4 radialLetterbox;
+    vec4 fogParams0;
+    vec4 fogParams1;
+    vec4 fogColor;
+    ivec4 flags;
+    vec4 exposureAdapt;  // x=auto, y=key, z=minLum, w=maxLum
+    vec4 exposureTiming; // x=speed, y=dt, z=compensationMul
+} uPost;
+
+shared float sLogLum[64];
+
+void main() {
+    uint idx = gl_LocalInvocationIndex;
+    vec2 uv = (vec2(gl_LocalInvocationID.xy) + 0.5) / vec2(8.0);
+    vec3 c = max(textureLod(uHdrIn, uv, 0.0).rgb, vec3(0.0));
+    if (uPost.bloomParams.x > 0.5 && uPost.bloomParams.y > 0.001) {
+        vec3 bloom = textureLod(uBloomTex, uv, 0.0).rgb;
+        if (!any(isnan(bloom)) && !any(isinf(bloom))) {
+            c += max(bloom, vec3(0.0)) * uPost.bloomParams.y * uPost.bloomTint.rgb;
+        }
+    }
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    sLogLum[idx] = log(max(luma, 1e-4));
+    barrier();
+
+    if (idx == 0u) {
+        float sum = 0.0;
+        for (int i = 0; i < 64; ++i) sum += sLogLum[i];
+        float target = exp(sum / 64.0);
+        float minLum = max(uPost.exposureAdapt.z, 1e-4);
+        float maxLum = max(uPost.exposureAdapt.w, minLum + 0.001);
+        target = clamp(target, minLum, maxLum);
+
+        float prev = uExposure.adaptedLum;
+        if (!(prev > 0.0) || isnan(prev) || isinf(prev)) prev = target;
+        float speed = max(uPost.exposureTiming.x, 0.0);
+        float dt = clamp(uPost.exposureTiming.y, 0.0, 0.1);
+        float t = clamp(1.0 - exp(-dt * speed), 0.0, 1.0);
+        float adapted = mix(prev, target, t);
+        uExposure.adaptedLum = adapted;
+
+        float comp = max(uPost.exposureTiming.z, 0.01);
+        if (uPost.exposureAdapt.x > 0.5) {
+            uExposure.exposureMul = (max(uPost.exposureAdapt.y, 0.001) / max(adapted, 1e-4)) * comp;
+        } else {
+            uExposure.exposureMul = comp;
+        }
+    }
+}

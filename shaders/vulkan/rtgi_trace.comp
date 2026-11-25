@@ -381,15 +381,15 @@ void main() {
             vec3 sunT, sunB;
             BuildOrthonormalBasis(sunL, sunT, sunB);
             float accumVis = 0.0;
-            for (uint si = 0u; si < 2u; ++si) {
-                vec2 uSun = R2Sequence(uGi.frameIndex * 2u + si + 1u, pixelR2Offset);
+            for (uint si = 0u; si < 4u; ++si) {
+                vec2 uSun = R2Sequence(uGi.frameIndex * 4u + si + 1u, pixelR2Offset);
                 float rDisk = sqrt(uSun.x) * coneRadius;
                 float phiDisk = 2.0 * PI * uSun.y;
                 vec3 jitterSunL = normalize(sunL + (sunT * cos(phiDisk) + sunB * sin(phiDisk)) * rDisk);
                 vec3 raySunL = (dot(N, jitterSunL) > 0.0) ? jitterSunL : sunL;
                 accumVis += TraceVisibility(worldPos + N * 0.008, raySunL, 0.002, 500.0) ? 1.0 : 0.0;
             }
-            sunVis = accumVis * 0.5;
+            sunVis = accumVis * 0.25;
         } else {
             sunVis = 0.0;
         }
@@ -397,7 +397,7 @@ void main() {
 
     // 2. Multi-ray cosine-weighted GI bounces using R2 low-discrepancy samples
     int rays = clamp(uGi.giRaysPerPixel, 1, 4);
-    int bounces = clamp(uGi.giBounces, 1, 2);
+    int bounces = clamp(uGi.giBounces, 1, 4);
     vec3 irradiance = vec3(0.0);
 
     for (int r = 0; r < rays; ++r) {
@@ -433,6 +433,9 @@ void main() {
             ro = hitPos + hitN * 0.005;
             curN = hitN;
         }
+        // Los picos aislados son la causa principal del parpadeo en zonas oscuras.
+        float rayMax = max(max(rayIrr.r, rayIrr.g), rayIrr.b);
+        if (rayMax > 8.0) rayIrr *= 8.0 / rayMax;
         irradiance += rayIrr;
     }
 

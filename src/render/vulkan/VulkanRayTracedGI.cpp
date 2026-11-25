@@ -203,7 +203,7 @@ void main() {
             sunVis = accumVis * 0.5;
         } else { sunVis = 0.0; }
     }
-    int rays = clamp(uGi.giRaysPerPixel, 1, 4); int bounces = clamp(uGi.giBounces, 1, 2);
+    int rays = clamp(uGi.giRaysPerPixel, 1, 4); int bounces = clamp(uGi.giBounces, 1, 4);
     vec3 irr = vec3(0.0);
     for (int r = 0; r < rays; ++r) {
         uint sampleIdx = (uGi.frameIndex * uint(rays)) + uint(r) + 1u;
@@ -1878,7 +1878,7 @@ bool VulkanRayTracedGI::ExecuteRTGI(
     ubo.frameIndex = m_RtgiTemporalFrame;
     ubo.sampleCount = m_RtgiTemporalFrame + 1u;
     ubo.giMode = 1;
-    ubo.giBounces = std::clamp(settings.giBounces, 1, 2);
+    ubo.giBounces = std::clamp(settings.giBounces, 1, 4);
     ubo.giRaysPerPixel = std::clamp(settings.giRaysPerPixel, 1, 4);
     ubo.giIntensity = settings.giIntensity;
     ubo.giTemporalAlpha = settings.giTemporalAlpha;

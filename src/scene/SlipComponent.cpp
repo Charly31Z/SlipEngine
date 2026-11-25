@@ -2181,6 +2181,8 @@ float PostVolumeInfluence(const PostProcessVolumeComponent& volume, const glm::v
 PostProcessSettings PostProcessVolumeComponent::Resolve(SlipLevel* level, const glm::vec3& cameraPos)
 {
     PostProcessSettings out;
+    out.ssaoIntensity = 0.0f;
+    out.ssao = false;
     if (!level) return out;
 
     struct Item {

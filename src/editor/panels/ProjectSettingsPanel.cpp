@@ -359,7 +359,12 @@ void ProjectSettingsPanel::RenderGraphicsCategory() {
         }
 
         if (data.giMode != GlobalIlluminationMode::Off) {
-            ImGui::SliderInt("Rebotes (Bounces)", &data.giBounces, 1, 8);
+            const int maxBounces = (data.giMode == GlobalIlluminationMode::RTGI) ? 4 : 8;
+            if (data.giBounces > maxBounces) data.giBounces = maxBounces;
+            ImGui::SliderInt("Rebotes (Bounces)", &data.giBounces, 1, maxBounces);
+            if (data.giMode == GlobalIlluminationMode::RTGI) {
+                ImGui::TextDisabled("RTGI en tiempo real usa hasta 4 rebotes. Path Tracing llega a 8.");
+            }
             const bool isRealtimePt = (data.giMode == GlobalIlluminationMode::PathTracing &&
                                        data.ptMode == PathTracingMode::RealtimeSVGF);
             const int maxSpp = isRealtimePt ? 2 : 4;

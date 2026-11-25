@@ -39,6 +39,11 @@ layout(set = 0, binding = 5) uniform SceneLightingUBO {
     vec4 cloudParams1;       // x=layerThickness, y=scale, z=edgeErosion, w=absorption
     vec4 cloudParams2;       // xy=windOffset, z=henyeyG, w=powderFactor
     vec4 cloudAmbient;       // rgb=cloudAmbientColor, w=silverSpread
+    mat4 currViewProj;
+    mat4 prevViewProj;
+    vec4 aoParams;           // x=enabled, y=radius, z=bias, w=intensity
+    vec4 aoParams2;          // x=power
+    mat4 view;
 } uScene;
 
 layout(set = 0, binding = 6) uniform sampler2D uRtgiTex;
@@ -71,6 +76,47 @@ vec3 ReconstructWorldPos(vec2 uv, float depth) {
     vec4 clip = vec4(ndc, depth, 1.0);
     vec4 world = uScene.invViewProj * clip;
     return world.xyz / max(abs(world.w), 1e-6);
+}
+
+float ComputeSSAO(vec3 worldPos, vec3 N) {
+    float radius = max(uScene.aoParams.y, 0.01);
+    float bias = max(uScene.aoParams.z, 0.0);
+
+    vec3 viewPos = (uScene.view * vec4(worldPos, 1.0)).xyz;
+    vec3 viewN = normalize(mat3(uScene.view) * N);
+    vec3 up = abs(viewN.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 T = normalize(cross(up, viewN));
+    vec3 B = cross(viewN, T);
+    mat3 invRot = transpose(mat3(uScene.view));
+    vec3 viewT = uScene.view[3].xyz;
+
+    const vec3 kernel[16] = vec3[16](
+        vec3(0.10, 0.22, 0.15), vec3(-0.18, 0.12, 0.22), vec3(0.24, -0.08, 0.18), vec3(-0.06, -0.20, 0.16),
+        vec3(0.32, 0.18, 0.40), vec3(-0.28, 0.26, 0.36), vec3(0.14, -0.34, 0.42), vec3(-0.36, -0.12, 0.30),
+        vec3(0.42, 0.08, 0.62), vec3(-0.16, 0.44, 0.55), vec3(0.22, -0.40, 0.70), vec3(-0.48, 0.16, 0.58),
+        vec3(0.08, 0.50, 0.84), vec3(-0.40, -0.36, 0.72), vec3(0.52, 0.28, 0.90), vec3(-0.22, -0.18, 0.96)
+    );
+
+    float occ = 0.0;
+    for (int i = 0; i < 16; ++i) {
+        float scale = float(i) / 15.0;
+        vec3 s = kernel[i] * mix(0.12, 1.0, scale * scale);
+        vec3 sampleView = viewPos + (T * s.x + B * s.y + viewN * s.z) * radius;
+        vec3 sampleWorld = invRot * (sampleView - viewT);
+
+        vec4 clip = uScene.currViewProj * vec4(sampleWorld, 1.0);
+        if (clip.w <= 1e-4) continue;
+        vec2 suv = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (suv.x <= 0.0 || suv.x >= 1.0 || suv.y <= 0.0 || suv.y >= 1.0) continue;
+
+        float sd = textureLod(uDepthTex, suv, 0.0).r;
+        if (sd >= 0.99999) continue;
+        vec3 sceneWorld = ReconstructWorldPos(suv, sd);
+        float sceneZ = (uScene.view * vec4(sceneWorld, 1.0)).z;
+        float rangeCheck = smoothstep(0.0, 1.0, radius / max(abs(viewPos.z - sceneZ), 1e-4));
+        occ += (sceneZ >= sampleView.z + bias) ? rangeCheck : 0.0;
+    }
+    return clamp(1.0 - occ / 16.0, 0.0, 1.0);
 }
 
 float CloudHash31(vec3 p) {
@@ -385,7 +431,14 @@ void main() {
         vec3 reflDir = reflect(-V, N);
         specEnv = EvaluateSky(reflDir, true) * Fenv * (1.0 - roughness) * 0.35 * ao;
     }
-    vec3 color = ambient + specEnv + Lo + albedo * emissive;
+    vec3 lit = ambient + specEnv + Lo;
+    if (uScene.aoParams.x > 0.5) {
+        float ssao = ComputeSSAO(worldPos, N);
+        ssao = pow(clamp(ssao, 0.0, 1.0), max(uScene.aoParams2.x, 0.01));
+        float aoFactor = clamp(mix(1.0, ssao, clamp(uScene.aoParams.w, 0.0, 2.0)), 0.0, 1.0);
+        lit *= aoFactor;
+    }
+    vec3 color = lit + albedo * emissive;
 
     imageStore(uHdrOut, pix, vec4(color, 1.0));
 }

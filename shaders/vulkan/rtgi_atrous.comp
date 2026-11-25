@@ -69,9 +69,10 @@ void main() {
 
     // Mirror/very smooth metals keep crisp reflections; glossy/rough surfaces denoise smoothly
     float reflBlurFactor = smoothstep(0.07, 0.32, centerRough);
-    float phiGi = 1.65;
+    // Phi relativo: un pico de emisor no se queda en un solo pixel, se reparte con sus vecinos.
+    float phiGi = max(1.65, 0.55 * centerGiLuma);
     float phiShadow = 0.65;
-    float phiRefl = mix(0.35, 2.2, centerRough);
+    float phiRefl = max(mix(0.35, 2.2, centerRough), 0.55 * centerReflLuma);
 
     const float kWeights[3] = float[3](0.375, 0.25, 0.0625);
 
@@ -97,7 +98,7 @@ void main() {
             vec3 qN = normalize(qNR.xyz);
             float qLogD = log(max(1.0 - qDepth, 1e-5));
 
-            float nW = pow(max(dot(centerN, qN), 0.0), 32.0);
+            float nW = pow(max(dot(centerN, qN), 0.0), 12.0);
             float dRel = abs(centerLogD - qLogD);
             float dW = exp(-dRel * dRel * 18.0);
             float kernelW = kWeights[abs(dx)] * kWeights[abs(dy)];

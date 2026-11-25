@@ -87,6 +87,9 @@ struct alignas(16) GpuSceneLightingUBO {
     glm::vec4 cloudAmbient{ 0.52f, 0.62f, 0.75f, 0.95f }; // rgb=ambient, w=silverSpread
     glm::mat4 currViewProj{ 1.0f };
     glm::mat4 prevViewProj{ 1.0f };
+    glm::vec4 aoParams{ 0.0f, 0.45f, 0.025f, 1.0f }; // x=enabled, y=radius, z=bias, w=intensity
+    glm::vec4 aoParams2{ 1.4f, 0.0f, 0.0f, 0.0f };    // x=power
+    glm::mat4 view{ 1.0f };
 };
 
 struct alignas(16) GpuPostProcessUBO {
@@ -106,7 +109,9 @@ struct alignas(16) GpuPostProcessUBO {
     glm::vec4 fogParams0{ 0.0f, 0.003f, 0.035f, 0.0f };   // x=enabled, y=density, z=heightFalloff, w=fogHeight
     glm::vec4 fogParams1{ 5.0f, 12000.0f, 0.65f, 0.90f }; // x=startDist, y=maxDist, z=sunScattering, w=skyBlend
     glm::vec4 fogColor{ 0.65f, 0.72f, 0.85f, 0.0f };      // rgb, w=pillarbox
-    glm::ivec4 flags{ 0, 1, 1, 0 };                       // x=outlineEnabled, y=hasGBuffer, z=fxaaEnabled, w=unused
+    glm::ivec4 flags{ 0, 1, 1, 0 };                       // x=outlineEnabled, y=hasGBuffer, z=fxaaEnabled, w=fxaaQuality
+    glm::vec4 exposureAdapt{ 0.0f, 0.18f, 0.05f, 8.0f }; // x=auto, y=key, z=minLum, w=maxLum
+    glm::vec4 exposureTiming{ 2.0f, 0.016f, 1.0f, 0.0f }; // x=speed, y=dt, z=compensationMul
 };
 
 const char* kFallbackGBufferVert = R"GLSL(#version 460
@@ -665,7 +670,13 @@ void VulkanSceneRenderer::Shutdown() {
         m_RtGI.Shutdown(m_Context);
         m_ASManager.Shutdown(m_Context);
 
+        if (m_ParticleAdditivePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(device, m_ParticleAdditivePipeline, nullptr); m_ParticleAdditivePipeline = VK_NULL_HANDLE; }
+        if (m_ParticleAlphaPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(device, m_ParticleAlphaPipeline, nullptr); m_ParticleAlphaPipeline = VK_NULL_HANDLE; }
+        if (m_ParticlePipeLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, m_ParticlePipeLayout, nullptr); m_ParticlePipeLayout = VK_NULL_HANDLE; }
+        m_ParticlePipelinesTried = false;
+
         for (uint32_t i = 0; i < kFrameSlots; ++i) {
+            m_ParticleVertexBuffers[i].Destroy(m_Context);
             m_CameraUBOs[i].Destroy(m_Context);
             m_InstanceSSBOs[i].Destroy(m_Context);
             m_LightingUBOs[i].Destroy(m_Context);
@@ -704,15 +715,15 @@ bool VulkanSceneRenderer::CreatePerFrameResources() {
 
     // 1. Descriptor Pool
     std::array<VkDescriptorPoolSize, 4> poolSizes = {{
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 40 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 24 }
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 48 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 24 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 80 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 32 }
     }};
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = 24;
+    poolInfo.maxSets = 32;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_Pool) != VK_SUCCESS) return false;
@@ -988,6 +999,10 @@ bool VulkanSceneRenderer::CreatePipelines() {
     {
         std::string src = LoadShaderSourceWithFallback("shaders/vulkan/lighting_direct.comp", std::string(kFallbackLightingCompA) + kFallbackLightingCompB);
         VkShaderModule mod = CreateShaderModuleFromGlsl(device, src, SpirvShaderStage::Compute, "lighting_direct.comp");
+        if (mod == VK_NULL_HANDLE) {
+            src = std::string(kFallbackLightingCompA) + kFallbackLightingCompB;
+            mod = CreateShaderModuleFromGlsl(device, src, SpirvShaderStage::Compute, "lighting_direct.comp.fallback");
+        }
         if (mod == VK_NULL_HANDLE) return false;
 
         VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
@@ -1063,6 +1078,10 @@ bool VulkanSceneRenderer::CreatePipelines() {
     {
         std::string src = LoadShaderSourceWithFallback("shaders/vulkan/tonemap.comp", kFallbackTonemapComp);
         VkShaderModule mod = CreateShaderModuleFromGlsl(device, src, SpirvShaderStage::Compute, "tonemap.comp");
+        if (mod == VK_NULL_HANDLE) {
+            src = kFallbackTonemapComp;
+            mod = CreateShaderModuleFromGlsl(device, src, SpirvShaderStage::Compute, "tonemap.comp.fallback");
+        }
         if (mod == VK_NULL_HANDLE) return false;
 
         VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
@@ -1104,7 +1123,7 @@ bool VulkanSceneRenderer::EnsureRenderTargets(uint32_t width, uint32_t height) {
     if (!m_GBufMetalEmissive.CreateImage2D(m_Context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, gbufUsage, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     if (!m_GBufMotion.CreateImage2D(m_Context, width, height, VK_FORMAT_R16G16_SFLOAT, gbufUsage, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     if (!m_GBufDepth.CreateImage2D(m_Context, width, height, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, true, VK_FILTER_NEAREST)) return false;
-    if (!m_HdrColor.CreateImage2D(m_Context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_LINEAR)) return false;
+    if (!m_HdrColor.CreateImage2D(m_Context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_LINEAR)) return false;
 
     const uint32_t bloomW = (std::max)(1u, width / 2u);
     const uint32_t bloomH = (std::max)(1u, height / 2u);
@@ -1372,6 +1391,298 @@ const VulkanSceneRenderer::GpuMesh* VulkanSceneRenderer::GetOrUploadPrimitive(in
     return &inserted.first->second;
 }
 
+namespace {
+const char* kParticleVert = R"GLSL(#version 460
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec4 aColor;
+layout(location = 3) in float aShape;
+layout(push_constant) uniform PC { mat4 viewProj; } pc;
+layout(location = 0) out vec2 vUV;
+layout(location = 1) out vec4 vColor;
+layout(location = 2) out float vShape;
+void main() {
+    vUV = aUV; vColor = aColor; vShape = aShape;
+    gl_Position = pc.viewProj * vec4(aPos, 1.0);
+}
+)GLSL";
+
+const char* kParticleFrag = R"GLSL(#version 460
+layout(location = 0) in vec2 vUV;
+layout(location = 1) in vec4 vColor;
+layout(location = 2) in float vShape;
+layout(location = 0) out vec4 outColor;
+void main() {
+    vec2 c = vUV * 2.0 - 1.0;
+    float d = length(c);
+    int shape = int(vShape + 0.5);
+    vec3 rgb = vColor.rgb;
+    float a = vColor.a;
+    if (shape == 0) {            // Soft circle
+        a *= 1.0 - smoothstep(0.0, 1.0, d);
+    } else if (shape == 1) {     // Lit sphere (fake shading)
+        if (d > 1.0) discard;
+        vec3 n = vec3(c.x, -c.y, sqrt(max(1.0 - d * d, 0.0)));
+        float l = 0.35 + 0.65 * max(dot(n, normalize(vec3(0.4, 0.6, 0.7))), 0.0);
+        rgb *= l;
+        a *= 1.0 - smoothstep(0.85, 1.0, d);
+    }                            // shape 2: square, full coverage
+    if (a <= 0.001) discard;
+    outColor = vec4(rgb, a);
+}
+)GLSL";
+
+struct ParticleGpuVertex {
+    glm::vec3 pos;
+    glm::vec2 uv;
+    glm::vec4 color;
+    float shape;
+};
+} // namespace
+
+bool VulkanSceneRenderer::CreateParticlePipelines() {
+    if (m_ParticlePipelinesTried) return m_ParticleAdditivePipeline != VK_NULL_HANDLE && m_ParticleAlphaPipeline != VK_NULL_HANDLE;
+    m_ParticlePipelinesTried = true;
+
+    VkDevice device = m_Context->GetDevice();
+    VkShaderModule vert = CreateShaderModuleFromGlsl(device, kParticleVert, SpirvShaderStage::Vertex, "particle.vert");
+    VkShaderModule frag = CreateShaderModuleFromGlsl(device, kParticleFrag, SpirvShaderStage::Fragment, "particle.frag");
+    if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
+        if (vert) vkDestroyShaderModule(device, vert, nullptr);
+        if (frag) vkDestroyShaderModule(device, frag, nullptr);
+        return false;
+    }
+
+    VkPushConstantRange pc{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4) };
+    VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pc;
+    if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_ParticlePipeLayout) != VK_SUCCESS) {
+        vkDestroyShaderModule(device, vert, nullptr);
+        vkDestroyShaderModule(device, frag, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName = "main";
+
+    VkVertexInputBindingDescription binding{ 0, sizeof(ParticleGpuVertex), VK_VERTEX_INPUT_RATE_VERTEX };
+    std::array<VkVertexInputAttributeDescription, 4> attrs{};
+    attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<uint32_t>(offsetof(ParticleGpuVertex, pos)) };
+    attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<uint32_t>(offsetof(ParticleGpuVertex, uv)) };
+    attrs[2] = { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, static_cast<uint32_t>(offsetof(ParticleGpuVertex, color)) };
+    attrs[3] = { 3, 0, VK_FORMAT_R32_SFLOAT, static_cast<uint32_t>(offsetof(ParticleGpuVertex, shape)) };
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &binding;
+    vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attrs.size());
+    vertexInput.pVertexAttributeDescriptions = attrs.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAsm{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    inputAsm.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo raster{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo msaa{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depth{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    depth.depthTestEnable = VK_TRUE;
+    depth.depthWriteEnable = VK_FALSE;
+    depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    std::array<VkDynamicState, 2> dynStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynInfo{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dynInfo.dynamicStateCount = static_cast<uint32_t>(dynStates.size());
+    dynInfo.pDynamicStates = dynStates.data();
+
+    VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkPipelineRenderingCreateInfo renderingInfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachmentFormats = &colorFormat;
+    renderingInfo.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
+
+    auto build = [&](bool additive, VkPipeline& out) {
+        VkPipelineColorBlendAttachmentState att{};
+        att.blendEnable = VK_TRUE;
+        att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        att.dstColorBlendFactor = additive ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        att.colorBlendOp = VK_BLEND_OP_ADD;
+        att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        att.alphaBlendOp = VK_BLEND_OP_ADD;
+        att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo blend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        blend.attachmentCount = 1;
+        blend.pAttachments = &att;
+
+        VkGraphicsPipelineCreateInfo gp{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        gp.pNext = &renderingInfo;
+        gp.stageCount = 2;
+        gp.pStages = stages;
+        gp.pVertexInputState = &vertexInput;
+        gp.pInputAssemblyState = &inputAsm;
+        gp.pViewportState = &viewportState;
+        gp.pRasterizationState = &raster;
+        gp.pMultisampleState = &msaa;
+        gp.pDepthStencilState = &depth;
+        gp.pColorBlendState = &blend;
+        gp.pDynamicState = &dynInfo;
+        gp.layout = m_ParticlePipeLayout;
+        return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &out) == VK_SUCCESS;
+    };
+
+    const bool ok = build(true, m_ParticleAdditivePipeline) && build(false, m_ParticleAlphaPipeline);
+    vkDestroyShaderModule(device, vert, nullptr);
+    vkDestroyShaderModule(device, frag, nullptr);
+    if (!ok) std::cerr << "[VulkanSceneRenderer] No se pudo crear el pipeline de particulas" << std::endl;
+    return ok;
+}
+
+bool VulkanSceneRenderer::RenderParticles(
+    VkCommandBuffer cmd, uint32_t slot, SlipLevel* level, const glm::mat4& view,
+    const glm::mat4& viewProj, const glm::vec3& cameraPos, uint32_t width, uint32_t height)
+{
+    if (!level) return false;
+
+    struct Emitter { ParticleSystemComponent* ps; glm::mat4 world; float distSq; };
+    std::vector<Emitter> emitters;
+    for (SlipEntity* ent : level->GetEntities()) {
+        if (!ent) continue;
+        auto ps = ent->GetComponent<ParticleSystemComponent>();
+        if (!ps || !ps->IsEnabled() || ps->GetParticles().empty()) continue;
+        glm::mat4 world = ent->getMatrix();
+        glm::vec3 center = glm::vec3(world[3]);
+        emitters.push_back({ ps.get(), world, glm::dot(center - cameraPos, center - cameraPos) });
+    }
+    if (emitters.empty()) return false;
+    std::sort(emitters.begin(), emitters.end(), [](const Emitter& a, const Emitter& b) { return a.distSq > b.distSq; });
+
+    const glm::mat4 invView = glm::inverse(view);
+    const glm::vec3 camRight = glm::normalize(glm::vec3(invView[0]));
+    const glm::vec3 camUp = glm::normalize(glm::vec3(invView[1]));
+
+    struct Batch { uint32_t first; uint32_t count; bool additive; };
+    std::vector<ParticleGpuVertex> verts;
+    std::vector<Batch> batches;
+
+    for (const auto& e : emitters) {
+        ParticleSystemComponent* ps = e.ps;
+        const bool additive = (ps->blendMode == ParticleBlendMode::Additive);
+        const bool pointMode = (ps->renderMode == ParticleRenderMode::PointNiagara);
+        float shape = 0.0f; // soft circle
+        if (pointMode) {
+            shape = (ps->pointShape == ParticlePointShape::LitSphere) ? 1.0f
+                  : (ps->pointShape == ParticlePointShape::Square) ? 2.0f : 0.0f;
+        }
+        glm::vec3 emissive(0.0f);
+        if (ps->materialMode == ParticleMaterialMode::Emissive) {
+            emissive = ps->emissiveColor * ps->emissiveIntensity;
+        }
+
+        const uint32_t batchStart = static_cast<uint32_t>(verts.size());
+        for (const auto& p : ps->GetParticles()) {
+            if (verts.size() + 6 > kMaxParticleVertices) break;
+            glm::vec3 wPos = ps->simulationSpaceLocal ? glm::vec3(e.world * glm::vec4(p.position, 1.0f)) : p.position;
+
+            float size = pointMode ? p.size * ps->pointBaseScale : p.size;
+            float rad = pointMode ? 0.0f : glm::radians(p.rotation);
+            float c = std::cos(rad), s = std::sin(rad);
+            float half = size * 0.5f;
+            glm::vec3 rAxis = (camRight * c + camUp * s) * half;
+            glm::vec3 uAxis = (-camRight * s + camUp * c) * half;
+
+            glm::vec3 rgb = glm::vec3(p.color);
+            rgb = rgb + emissive * rgb;
+            glm::vec4 col(rgb, p.color.a);
+
+            glm::vec3 p0 = wPos - rAxis - uAxis;
+            glm::vec3 p1 = wPos + rAxis - uAxis;
+            glm::vec3 p2 = wPos + rAxis + uAxis;
+            glm::vec3 p3 = wPos - rAxis + uAxis;
+            verts.push_back({ p0, { 0, 0 }, col, shape });
+            verts.push_back({ p1, { 1, 0 }, col, shape });
+            verts.push_back({ p2, { 1, 1 }, col, shape });
+            verts.push_back({ p0, { 0, 0 }, col, shape });
+            verts.push_back({ p2, { 1, 1 }, col, shape });
+            verts.push_back({ p3, { 0, 1 }, col, shape });
+        }
+        const uint32_t count = static_cast<uint32_t>(verts.size()) - batchStart;
+        if (count > 0) {
+            if (!batches.empty() && batches.back().additive == additive) batches.back().count += count;
+            else batches.push_back({ batchStart, count, additive });
+        }
+    }
+    if (verts.empty()) return false;
+    if (!CreateParticlePipelines()) return false;
+
+    VulkanBuffer& vb = m_ParticleVertexBuffers[slot];
+    if (!vb.IsValid()) {
+        if (!vb.Create(m_Context, sizeof(ParticleGpuVertex) * kMaxParticleVertices, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true)) return false;
+    }
+    vb.Upload(m_Context, verts.data(), verts.size() * sizeof(ParticleGpuVertex), 0);
+
+    // HDR (GENERAL tras el compute de iluminacion) -> color attachment; depth -> attachment (solo lectura via depthWrite off)
+    VulkanTexture::TransitionImageLayout(cmd, m_HdrColor.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    VkRenderingAttachmentInfo colorAtt{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    colorAtt.imageView = m_HdrColor.GetImageView();
+    colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingAttachmentInfo depthAtt{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    depthAtt.imageView = m_GBufDepth.GetImageView();
+    depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderInfo{ VK_STRUCTURE_TYPE_RENDERING_INFO };
+    renderInfo.renderArea = { { 0, 0 }, { width, height } };
+    renderInfo.layerCount = 1;
+    renderInfo.colorAttachmentCount = 1;
+    renderInfo.pColorAttachments = &colorAtt;
+    renderInfo.pDepthAttachment = &depthAtt;
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    VkViewport vp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
+    VkRect2D scissor{ { 0, 0 }, { width, height } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    VkBuffer buf = vb.GetBuffer();
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &buf, &off);
+    vkCmdPushConstants(cmd, m_ParticlePipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &viewProj);
+    for (const auto& b : batches) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, b.additive ? m_ParticleAdditivePipeline : m_ParticleAlphaPipeline);
+        vkCmdDraw(cmd, b.count, 1, b.first, 0);
+    }
+    vkCmdEndRendering(cmd);
+
+    VulkanTexture::TransitionImageLayout(cmd, m_HdrColor.GetImage(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    m_LastDrawCallCount += static_cast<uint32_t>(batches.size());
+    return true;
+}
+
 bool VulkanSceneRenderer::RenderScene(
     VkCommandBuffer cmd,
     uint32_t frameIndex,
@@ -1431,6 +1742,7 @@ bool VulkanSceneRenderer::RenderScene(
     lightUbo.cameraPos = glm::vec4(cameraPos, 1.0f);
     lightUbo.currViewProj = viewProj;
     lightUbo.prevViewProj = prevViewProj;
+    lightUbo.view = view;
 
     const auto& gfx = SlipGraphicsSettings::Get().GetData();
     lightUbo.skyZenith = glm::vec4(gfx.skyZenithColor, gfx.skyEnabled ? 1.0f : 0.0f);
@@ -1572,6 +1884,15 @@ bool VulkanSceneRenderer::RenderScene(
     if (!instances.empty()) {
         m_InstanceSSBOs[slot].Upload(m_Context, instances.data(), instances.size() * sizeof(GpuInstanceData), 0);
     }
+
+    PostProcessSettings post = PostProcessVolumeComponent::Resolve(level, cameraPos);
+    lightUbo.aoParams = glm::vec4(
+        post.ssao ? 1.0f : 0.0f,
+        post.ssaoRadius,
+        post.ssaoBias,
+        glm::clamp(post.ssaoIntensity, 0.0f, 2.0f)
+    );
+    lightUbo.aoParams2 = glm::vec4(post.ssaoPower, 0.0f, 0.0f, 0.0f);
     m_LightingUBOs[slot].Upload(m_Context, &lightUbo, sizeof(lightUbo), 0);
 
     UpdateComputeDescriptors(slot, targetView, targetGeneration);
@@ -1580,7 +1901,6 @@ bool VulkanSceneRenderer::RenderScene(
     const uint32_t groupsX = (width + 7) / 8;
     const uint32_t groupsY = (height + 7) / 8;
 
-    PostProcessSettings post = PostProcessVolumeComponent::Resolve(level, cameraPos);
     GpuPostProcessUBO postUbo{};
     postUbo.invViewProj = invViewProj;
     postUbo.cameraPos = glm::vec4(cameraPos, 1.0f);
@@ -1591,6 +1911,12 @@ bool VulkanSceneRenderer::RenderScene(
     postUbo.lensParams = glm::vec4(post.lensBloom ? 1.0f : 0.0f, post.lensIntensity, post.lensThreshold, post.lensHalo);
     const float exposureMul = std::exp2(glm::clamp(post.exposureCompensation, -8.0f, 8.0f));
     postUbo.colorParams = glm::vec4(exposureMul, post.contrast, post.saturation, post.temperature);
+    postUbo.exposureAdapt = glm::vec4(
+        post.autoExposure ? 1.0f : 0.0f,
+        post.exposureKey,
+        post.exposureMin,
+        (std::max)(post.exposureMax, post.exposureMin + 0.001f)
+    );
     postUbo.lift = glm::vec4(post.lift, static_cast<float>(post.tonemap));
     postUbo.gamma = glm::vec4(post.gamma, post.vignetteIntensity);
     postUbo.gain = glm::vec4(post.gain, post.vignetteSmoothness);
@@ -1604,7 +1930,12 @@ bool VulkanSceneRenderer::RenderScene(
     postUbo.fogParams0 = glm::vec4(post.fog ? 1.0f : 0.0f, post.fogDensity, post.fogHeightFalloff, post.fogHeight);
     postUbo.fogParams1 = glm::vec4(post.fogStartDistance, post.fogMaxDistance, post.fogSunScattering, post.fogSkyBlend);
     postUbo.fogColor = glm::vec4(post.fogColor, glm::clamp(post.pillarbox, 0.0f, 0.49f));
-    postUbo.flags = glm::ivec4(m_SelectedEntity ? 1 : 0, 1, post.fxAA ? 1 : 0, 0);
+    postUbo.flags = glm::ivec4(
+        m_SelectedEntity ? 1 : 0,
+        1,
+        gfx.fxAAEnabled ? 1 : 0,
+        glm::clamp(gfx.fxAAQuality, 0, 2)
+    );
 
     auto runPostProcessAndTonemap = [&](bool hasGBuffer) {
         postUbo.flags.y = hasGBuffer ? 1 : 0;
@@ -1859,7 +2190,10 @@ bool VulkanSceneRenderer::RenderScene(
     // ------------------------------------------------------------------------
     // Pass 3: Bloom + Post-Process + Tone Mapping + Outline -> Target RGBA8 Image
     // ------------------------------------------------------------------------
-    VulkanTexture::TransitionImageLayout(cmd, m_HdrColor.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    // Pass 2C: Particles (forward, depth-tested) -> HDR, antes del bloom para que las chispas emisivas brillen
+    if (!RenderParticles(cmd, slot, level, view, viewProj, cameraPos, width, height)) {
+        VulkanTexture::TransitionImageLayout(cmd, m_HdrColor.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    }
     runPostProcessAndTonemap(true);
     return true;
 }

@@ -74,7 +74,7 @@ void main() {
 
             vec3 qN = normalize(texelFetch(uNormalRough, q, 0).xyz);
             float qLogD = log(max(1.0 - qDepth, 1e-5));
-            if (dot(centerN, qN) < 0.70 || abs(centerLogD - qLogD) > 0.25) continue;
+            if (dot(centerN, qN) < 0.50 || abs(centerLogD - qLogD) > 0.25) continue;
 
             vec4 qGi = texelFetch(uRtgiRaw, q, 0);
             vec3 qRefl = texelFetch(uRtReflRaw, q, 0).rgb;
@@ -91,13 +91,42 @@ void main() {
 
     vec4 giMean = (momentCount > 0.5) ? (giM1 / momentCount) : centerGi;
     vec4 giStd = (momentCount > 0.5) ? sqrt(max(giM2 / momentCount - giMean * giMean, vec4(0.0))) : vec4(0.0);
-    vec4 giMin = giMean - giStd * 1.75;
-    vec4 giMax = giMean + giStd * 1.75;
+    giStd = max(giStd, abs(giMean) * 0.30 + vec4(0.015));
+    vec4 giMin = giMean - giStd * 2.5;
+    vec4 giMax = giMean + giStd * 2.5;
+    giMin.a = 0.0;
+    giMax.a = 1.0;
 
     vec3 reflMean = (momentCount > 0.5) ? (reflM1 / momentCount) : centerRefl.rgb;
     vec3 reflStd = (momentCount > 0.5) ? sqrt(max(reflM2 / momentCount - reflMean * reflMean, vec3(0.0))) : vec3(0.0);
-    vec3 reflMin = reflMean - reflStd * 1.85;
-    vec3 reflMax = reflMean + reflStd * 1.85;
+    reflStd = max(reflStd, abs(reflMean) * 0.20 + vec3(0.01));
+    vec3 reflMin = reflMean - reflStd * 2.2;
+    vec3 reflMax = reflMean + reflStd * 2.2;
+
+    // Media 5x5: un emisor solo lo alcanza un rayo de vez en cuando. Promediar antes de
+    // acumular evita que ese pico salte de pixel en pixel cada fotograma.
+    vec3 wideGi = vec3(0.0);
+    vec3 wideRefl = vec3(0.0);
+    float wideCount = 0.0;
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            ivec2 q = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
+            float qDepth = texelFetch(uDepth, q, 0).r;
+            if (qDepth >= 0.99999) continue;
+            vec3 qN = normalize(texelFetch(uNormalRough, q, 0).xyz);
+            float qLogD = log(max(1.0 - qDepth, 1e-5));
+            if (dot(centerN, qN) < 0.50 || abs(centerLogD - qLogD) > 0.25) continue;
+            vec4 qGi = texelFetch(uRtgiRaw, q, 0);
+            vec3 qRefl = texelFetch(uRtReflRaw, q, 0).rgb;
+            if (any(isnan(qGi)) || any(isinf(qGi))) continue;
+            if (any(isnan(qRefl)) || any(isinf(qRefl))) qRefl = vec3(0.0);
+            wideGi += qGi.rgb;
+            wideRefl += qRefl;
+            wideCount += 1.0;
+        }
+    }
+    vec3 giSource = (wideCount > 0.5) ? (wideGi / wideCount) : centerGi.rgb;
+    vec3 reflSource = (wideCount > 0.5) ? (wideRefl / wideCount) : centerRefl.rgb;
 
     vec2 uv = (vec2(pix) + 0.5) / vec2(size);
     vec2 motion = texelFetch(uMotion, pix, 0).rg;
@@ -105,24 +134,54 @@ void main() {
 
     vec4 giResult = centerGi;
     vec3 reflResult = centerRefl.rgb;
+    float newHistLen = 1.0; // longitud de historia (se guarda en el alpha del historial de reflejos)
 
     if (uGi.frameIndex > 0u && all(greaterThan(prevUV, vec2(0.0))) && all(lessThan(prevUV, vec2(1.0)))) {
+        float motionPx = length(motion * vec2(size));
+        float still = 1.0 - smoothstep(0.20, 1.75, motionPx);
         float prevDepth = textureLod(uDepth, prevUV, 0.0).r;
         vec3 prevN = normalize(textureLod(uNormalRough, prevUV, 0.0).xyz);
         float prevLogD = log(max(1.0 - prevDepth, 1e-5));
-        if (prevDepth < 0.99999 && dot(centerN, prevN) > 0.85 && abs(centerLogD - prevLogD) < 0.08) {
+        float normalTol = mix(0.60, 0.42, still);
+        float depthTol = mix(0.08, 0.22, still);
+        if (prevDepth < 0.99999 && dot(centerN, prevN) > normalTol && abs(centerLogD - prevLogD) < depthTol) {
+            float prevLenRaw = textureLod(uRtReflPrevHistory, prevUV, 0.0).a;
+            float prevLen = (isnan(prevLenRaw) || isinf(prevLenRaw)) ? 1.0 : clamp(prevLenRaw, 1.0, 256.0);
+            float maxLen = mix(24.0, 192.0, still);
+            newHistLen = min(prevLen + 1.0, maxLen);
+            float movingFloor = clamp(uGi.giTemporalAlpha, 0.03, 0.20);
+            float minAlpha = mix(movingFloor, 0.0, still);
+            float adaptiveAlpha = max(1.0 / newHistLen, minAlpha);
+
+            float giLumaMean = dot(max(giMean.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+            float giLumaStd = dot(max(giStd.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+            float spike = smoothstep(0.35, 1.8, giLumaStd / max(giLumaMean, 0.05));
+            float alphaGi = mix(adaptiveAlpha, min(adaptiveAlpha, mix(0.06, 0.008, still)), spike);
+
             vec4 prevGi = textureLod(uRtgiPrevHistory, prevUV, 0.0);
             if (!any(isnan(prevGi)) && !any(isinf(prevGi))) {
-                vec4 clampedGi = clamp(prevGi, giMin, giMax);
-                float alphaGi = clamp(uGi.giTemporalAlpha, 0.03, 0.35);
-                giResult = mix(clampedGi, centerGi, alphaGi);
+                // Camara quieta: no recortar el historial contra el fotograma crudo.
+                // Ese recorte es lo que hace caminar los puntos de los emisivos.
+                vec4 histGi = prevGi;
+                if (still < 0.65) {
+                    float expand = mix(1.0, 3.0, still);
+                    histGi = clamp(prevGi, giMean - (giMean - giMin) * expand, giMean + (giMax - giMean) * expand);
+                    histGi.a = clamp(prevGi.a, 0.0, 1.0);
+                }
+                vec3 srcGi = mix(centerGi.rgb, giSource, clamp(still + spike, 0.0, 1.0));
+                giResult = mix(histGi, vec4(srcGi, centerGi.a), clamp(alphaGi, 0.0, 1.0));
             }
 
             vec3 prevRefl = textureLod(uRtReflPrevHistory, prevUV, 0.0).rgb;
             if (!any(isnan(prevRefl)) && !any(isinf(prevRefl))) {
-                vec3 clampedRefl = clamp(prevRefl, reflMin, reflMax);
-                float alphaRefl = mix(clamp(uGi.giTemporalAlpha, 0.04, 0.25), 0.28, 1.0 - smoothstep(0.06, 0.35, centerRough));
-                reflResult = mix(clampedRefl, centerRefl.rgb, alphaRefl);
+                vec3 histRefl = prevRefl;
+                if (still < 0.65) {
+                    histRefl = clamp(prevRefl, reflMin, reflMax);
+                }
+                float movingRefl = mix(clamp(uGi.giTemporalAlpha, 0.04, 0.25), 0.28, 1.0 - smoothstep(0.06, 0.35, centerRough));
+                float alphaRefl = mix(movingRefl, min(adaptiveAlpha, mix(0.08, 0.01, spike)), still);
+                vec3 srcRefl = mix(centerRefl.rgb, reflSource, clamp(still + spike, 0.0, 1.0));
+                reflResult = mix(histRefl, srcRefl, clamp(alphaRefl, 0.0, 1.0));
             }
         }
     }
@@ -131,5 +190,5 @@ void main() {
     if (any(isnan(reflResult)) || any(isinf(reflResult))) reflResult = vec3(0.0);
 
     imageStore(uRtgiCurrHistory, pix, vec4(max(giResult.rgb, vec3(0.0)), clamp(giResult.a, 0.0, 1.0)));
-    imageStore(uRtReflCurrHistory, pix, vec4(max(reflResult, vec3(0.0)), 1.0));
+    imageStore(uRtReflCurrHistory, pix, vec4(max(reflResult, vec3(0.0)), newHistLen));
 }
