@@ -92,7 +92,7 @@ layout(set = 1, binding = 5) uniform GiParamsUBO {
 layout(set = 1, binding = 6, rgba16f) uniform writeonly image2D uPtNormalRoughOut;
 layout(set = 1, binding = 7, rgba16f) uniform image2D uPtAlbedoOut;
 layout(set = 1, binding = 8, rgba16f) uniform image2D uPtEmissiveOut;
-layout(set = 1, binding = 9, rg32f)   uniform writeonly image2D uPtDepthInstOut;
+layout(set = 1, binding = 9, rgba32f) uniform writeonly image2D uPtDepthInstOut;
 layout(set = 1, binding = 10, rg16f)  uniform writeonly image2D uPtMotionOut;
 layout(set = 1, binding = 11, rgba16f) uniform image2D uPtSpecAccum; // SpecularRadiance (NOT divided by diffuse albedo)
 
@@ -336,6 +336,28 @@ vec3 EvaluateBRDF(vec3 N, vec3 V, vec3 L, vec3 rad, vec3 albedo, float rough, fl
     return dIrr * albedo + sRad;
 }
 
+// Shading normal: geometric normal + tangent-space normal map (same TBN as the raster G-buffer).
+vec3 ApplyNormalMap(vec3 geomN, vec3 localT, vec3 localB, mat4x3 worldToObj, vec2 uv, GpuMaterialData mat) {
+    vec3 N = geomN;
+    if (mat.texIndices0.y < 0) return N;
+    if (dot(localT, localT) < 1e-8 || dot(localB, localB) < 1e-8) return N;
+
+    mat3 objToWorld = inverse(mat3(worldToObj));
+    vec3 T = objToWorld * localT;
+    vec3 B = objToWorld * localB;
+    T = T - N * dot(T, N);
+    B = B - N * dot(B, N);
+    if (dot(T, T) < 1e-8 || dot(B, B) < 1e-8) return N;
+    T = normalize(T);
+    B = normalize(B - T * dot(B, T));
+    if (dot(B, B) < 1e-8) return N;
+    if (dot(cross(N, T), B) < 0.0) B = -B;
+
+    vec3 mapN = textureLod(uTextures[nonuniformEXT(mat.texIndices0.y)], uv, 0.0).xyz * 2.0 - 1.0;
+    mapN.xy *= mat.pbrParams.w;
+    return normalize(mat3(T, B, N) * mapN);
+}
+
 void BuildOrthonormalBasis(vec3 N, out vec3 T, out vec3 B) {
     vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     T = normalize(cross(up, N));
@@ -473,6 +495,7 @@ void main() {
     float primaryMetallicOut = 0.0;
     float primaryLinearDepthOut = 0.0;
     float primaryInstIdOut = 0.0;
+    float primaryWindowZOut = 1.0;
     vec2 primaryMotion2DOut = vec2(0.0);
 
     for (uint sIdx = 0u; sIdx < spp; ++sIdx) {
@@ -548,8 +571,16 @@ void main() {
                 vec2 uv0 = vec2(vBuf.data[b0 + 6u], vBuf.data[b0 + 7u]);
                 vec2 uv1 = vec2(vBuf.data[b1 + 6u], vBuf.data[b1 + 7u]);
                 vec2 uv2 = vec2(vBuf.data[b2 + 6u], vBuf.data[b2 + 7u]);
+                vec3 t0 = vec3(vBuf.data[b0 + 10u], vBuf.data[b0 + 11u], vBuf.data[b0 + 12u]);
+                vec3 t1 = vec3(vBuf.data[b1 + 10u], vBuf.data[b1 + 11u], vBuf.data[b1 + 12u]);
+                vec3 t2 = vec3(vBuf.data[b2 + 10u], vBuf.data[b2 + 11u], vBuf.data[b2 + 12u]);
+                vec3 bn0 = vec3(vBuf.data[b0 + 13u], vBuf.data[b0 + 14u], vBuf.data[b0 + 15u]);
+                vec3 bn1 = vec3(vBuf.data[b1 + 13u], vBuf.data[b1 + 14u], vBuf.data[b1 + 15u]);
+                vec3 bn2 = vec3(vBuf.data[b2 + 13u], vBuf.data[b2 + 14u], vBuf.data[b2 + 15u]);
 
                 vec3 localN = normalize(n0 * w.x + n1 * w.y + n2 * w.z);
+                vec3 localT = t0 * w.x + t1 * w.y + t2 * w.z;
+                vec3 localB = bn0 * w.x + bn1 * w.y + bn2 * w.z;
                 mat4x3 worldToObj = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
                 vec3 N = normalize(transpose(mat3(worldToObj)) * localN);
                 if (dot(N, -rd) < 0.0) N = -N;
@@ -559,11 +590,13 @@ void main() {
                 vec3 V = -rd;
 
                 GpuMaterialData mat = uMaterials.materials[info.materialIndex];
+                N = ApplyNormalMap(N, localT, localB, worldToObj, hitUv, mat);
                 vec3 hitAlbedo = mat.albedoColor.rgb;
                 if (mat.texIndices0.x >= 0) {
+                    // Albedo textures are VK_FORMAT_*_SRGB: the sampler already returns linear color.
                     hitAlbedo *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.x)], hitUv, 0.0).rgb;
                 }
-                hitAlbedo = pow(clamp(hitAlbedo, vec3(0.0), vec3(1.0)), vec3(2.2));
+                hitAlbedo = max(hitAlbedo, vec3(0.0));
 
                 float roughness = clamp(mat.pbrParams.x, 0.04, 1.0);
                 if (mat.texIndices0.z >= 0) {
@@ -586,7 +619,7 @@ void main() {
                 vec3 F0 = mix(vec3(0.04), hitAlbedo, metallic);
                 if (b == 0) {
                     // Store original primary hit albedo intact in G-Buffer (never filtered)
-                    primaryAlbedo = max(hitAlbedo, vec3(0.02));
+                    primaryAlbedo = hitAlbedo;
                     primaryEmis = hitEmissive;
                     if (sIdx == 0u) {
                         primaryNormalOut = N;
@@ -606,6 +639,7 @@ void main() {
                         vec2 currUv = (currClip.xy / max(abs(currClip.w), 1e-6)) * 0.5 + 0.5;
                         vec2 prevUv = (prevClip.xy / max(abs(prevClip.w), 1e-6)) * 0.5 + 0.5;
                         primaryMotion2DOut = currUv - prevUv;
+                        primaryWindowZOut = clamp(currClip.z / max(abs(currClip.w), 1e-6), 0.0, 1.0);
                     }
                 } else {
                     if (firstBounceIsSpecular) {
@@ -716,7 +750,7 @@ void main() {
     imageStore(uPtNormalRoughOut, pix, vec4(primaryNormalOut, primaryRoughnessOut));
     imageStore(uPtAlbedoOut, pix, vec4(outAlbedo, primaryMetallicOut));
     imageStore(uPtEmissiveOut, pix, vec4(outEmissive, 1.0));
-    imageStore(uPtDepthInstOut, pix, vec4(primaryLinearDepthOut, primaryInstIdOut, 0.0, 0.0));
+    imageStore(uPtDepthInstOut, pix, vec4(primaryLinearDepthOut, primaryInstIdOut, primaryWindowZOut, 0.0));
     imageStore(uPtMotionOut, pix, vec4(primaryMotion2DOut, 0.0, 0.0));
     imageStore(uPtAccum, pix, vec4(outDiffIrr, 1.0));
     imageStore(uPtSpecAccum, pix, vec4(outSpecRad, 1.0));

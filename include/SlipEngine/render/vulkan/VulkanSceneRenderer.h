@@ -89,7 +89,9 @@ private:
     };
 
     bool CreatePipelines();
+    bool CreatePtDepthPipeline();
     bool CreateParticlePipelines();
+    bool ResolvePathTracingDepth(VkCommandBuffer cmd, uint32_t slot, uint32_t width, uint32_t height);
     // Dibuja los sistemas de particulas (chispas, fuego, etc.) en m_HdrColor con prueba de profundidad.
     // Deja m_HdrColor en SHADER_READ_ONLY. Devuelve false (sin tocar layouts) si no hay nada que dibujar.
     bool RenderParticles(VkCommandBuffer cmd, uint32_t slot, SlipLevel* level, const glm::mat4& view,
@@ -121,6 +123,7 @@ private:
     VulkanTexture m_BloomPong;
     bool m_TargetsInitialized = false;
     bool m_BloomInitialized = false;
+    VkImageLayout m_GBufDepthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     // Descriptor layouts & pools
     VkDescriptorPool m_Pool = VK_NULL_HANDLE;
@@ -153,6 +156,11 @@ private:
 
     VkPipelineLayout m_TonemapPipeLayout = VK_NULL_HANDLE;
     VkPipeline m_TonemapPipeline = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout m_PtDepthLayout = VK_NULL_HANDLE;
+    VkDescriptorSet m_PtDepthSets[kFrameSlots]{};
+    VkPipelineLayout m_PtDepthPipeLayout = VK_NULL_HANDLE;
+    VkPipeline m_PtDepthPipeline = VK_NULL_HANDLE;
 
     // Particle pass (forward, additive / alpha blended, depth-tested against G-Buffer depth)
     static constexpr uint32_t kMaxParticleVertices = 6u * 32768u;

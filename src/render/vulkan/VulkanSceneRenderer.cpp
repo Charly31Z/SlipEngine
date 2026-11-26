@@ -24,6 +24,8 @@ static_assert(sizeof(Vertex) % sizeof(float) == 0, "Vertex size must be 4-byte f
 static_assert(offsetof(Vertex, Position) == 0, "Vertex::Position offset must be 0");
 static_assert(offsetof(Vertex, Normal) == 3 * sizeof(float), "Vertex::Normal offset must be 12");
 static_assert(offsetof(Vertex, TexCoords) == 6 * sizeof(float), "Vertex::TexCoords offset must be 24");
+static_assert(offsetof(Vertex, Tangent) == 10 * sizeof(float), "Vertex::Tangent offset must be 40");
+static_assert(offsetof(Vertex, Bitangent) == 13 * sizeof(float), "Vertex::Bitangent offset must be 52");
 
 namespace {
 
@@ -692,12 +694,15 @@ void VulkanSceneRenderer::Shutdown() {
         if (m_BloomPipeLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, m_BloomPipeLayout, nullptr); m_BloomPipeLayout = VK_NULL_HANDLE; }
         if (m_TonemapPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(device, m_TonemapPipeline, nullptr); m_TonemapPipeline = VK_NULL_HANDLE; }
         if (m_TonemapPipeLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, m_TonemapPipeLayout, nullptr); m_TonemapPipeLayout = VK_NULL_HANDLE; }
+        if (m_PtDepthPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(device, m_PtDepthPipeline, nullptr); m_PtDepthPipeline = VK_NULL_HANDLE; }
+        if (m_PtDepthPipeLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, m_PtDepthPipeLayout, nullptr); m_PtDepthPipeLayout = VK_NULL_HANDLE; }
 
         if (m_Pool != VK_NULL_HANDLE) { vkDestroyDescriptorPool(device, m_Pool, nullptr); m_Pool = VK_NULL_HANDLE; }
         if (m_GBufSceneLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, m_GBufSceneLayout, nullptr); m_GBufSceneLayout = VK_NULL_HANDLE; }
         if (m_LightingLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, m_LightingLayout, nullptr); m_LightingLayout = VK_NULL_HANDLE; }
         if (m_BloomLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, m_BloomLayout, nullptr); m_BloomLayout = VK_NULL_HANDLE; }
         if (m_TonemapLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, m_TonemapLayout, nullptr); m_TonemapLayout = VK_NULL_HANDLE; }
+        if (m_PtDepthLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, m_PtDepthLayout, nullptr); m_PtDepthLayout = VK_NULL_HANDLE; }
 
         m_Bindless.Shutdown(m_Context);
     }
@@ -780,6 +785,13 @@ bool VulkanSceneRenderer::CreatePerFrameResources() {
         info.pBindings = bindings.data();
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &m_TonemapLayout) != VK_SUCCESS) return false;
     }
+    {
+        VkDescriptorSetLayoutBinding binding{ 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+        VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        info.bindingCount = 1;
+        info.pBindings = &binding;
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &m_PtDepthLayout) != VK_SUCCESS) return false;
+    }
 
     // 3. Allocate sets & buffers
     for (uint32_t i = 0; i < kFrameSlots; ++i) {
@@ -810,6 +822,12 @@ bool VulkanSceneRenderer::CreatePerFrameResources() {
         m_LastLightingGiViews[i] = VK_NULL_HANDLE;
         m_LastLightingReflViews[i] = VK_NULL_HANDLE;
         m_LastTonemapTargetGens[i] = 0;
+
+        VkDescriptorSetAllocateInfo depthAlloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        depthAlloc.descriptorPool = m_Pool;
+        depthAlloc.descriptorSetCount = 1;
+        depthAlloc.pSetLayouts = &m_PtDepthLayout;
+        if (vkAllocateDescriptorSets(device, &depthAlloc, &m_PtDepthSets[i]) != VK_SUCCESS) return false;
 
         VkDescriptorBufferInfo camInfo{ m_CameraUBOs[i].GetBuffer(), 0, sizeof(GpuCameraUBO) };
         VkDescriptorBufferInfo instInfo{ m_InstanceSSBOs[i].GetBuffer(), 0, VK_WHOLE_SIZE };
@@ -1104,6 +1122,148 @@ bool VulkanSceneRenderer::CreatePipelines() {
         if (cRes != VK_SUCCESS) return false;
     }
 
+    if (!CreatePtDepthPipeline()) return false;
+    return true;
+}
+
+bool VulkanSceneRenderer::CreatePtDepthPipeline() {
+    VkDevice device = m_Context->GetDevice();
+    const char* vertSrc = R"GLSL(#version 460
+void main() {
+    vec2 p = vec2(float((gl_VertexIndex << 1) & 2), float(gl_VertexIndex & 2));
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)GLSL";
+    const char* fragSrc = R"GLSL(#version 460
+layout(set = 0, binding = 0) uniform sampler2D uDepth;
+void main() {
+    float z = texelFetch(uDepth, ivec2(gl_FragCoord.xy), 0).b;
+    gl_FragDepth = clamp(z, 0.0, 1.0);
+}
+)GLSL";
+    VkShaderModule vert = CreateShaderModuleFromGlsl(device, vertSrc, SpirvShaderStage::Vertex, "pt_depth.vert");
+    VkShaderModule frag = CreateShaderModuleFromGlsl(device, fragSrc, SpirvShaderStage::Fragment, "pt_depth.frag");
+    if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
+        if (vert) vkDestroyShaderModule(device, vert, nullptr);
+        if (frag) vkDestroyShaderModule(device, frag, nullptr);
+        return false;
+    }
+
+    VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plInfo.setLayoutCount = 1;
+    plInfo.pSetLayouts = &m_PtDepthLayout;
+    if (vkCreatePipelineLayout(device, &plInfo, nullptr, &m_PtDepthPipeLayout) != VK_SUCCESS) {
+        vkDestroyShaderModule(device, vert, nullptr);
+        vkDestroyShaderModule(device, frag, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo inputAsm{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    inputAsm.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewportState{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo msaa{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo depth{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    depth.depthTestEnable = VK_FALSE;
+    depth.depthWriteEnable = VK_TRUE;
+    depth.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    std::array<VkDynamicState, 2> dynStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynInfo{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dynInfo.dynamicStateCount = static_cast<uint32_t>(dynStates.size());
+    dynInfo.pDynamicStates = dynStates.data();
+    VkPipelineColorBlendStateCreateInfo blend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
+    VkPipelineRenderingCreateInfo renderingInfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+    renderingInfo.colorAttachmentCount = 0;
+    renderingInfo.depthAttachmentFormat = depthFormat;
+
+    VkGraphicsPipelineCreateInfo gp{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    gp.pNext = &renderingInfo;
+    gp.stageCount = 2;
+    gp.pStages = stages;
+    gp.pVertexInputState = &vertexInput;
+    gp.pInputAssemblyState = &inputAsm;
+    gp.pViewportState = &viewportState;
+    gp.pRasterizationState = &raster;
+    gp.pMultisampleState = &msaa;
+    gp.pDepthStencilState = &depth;
+    gp.pColorBlendState = &blend;
+    gp.pDynamicState = &dynInfo;
+    gp.layout = m_PtDepthPipeLayout;
+    const bool ok = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &m_PtDepthPipeline) == VK_SUCCESS;
+    vkDestroyShaderModule(device, vert, nullptr);
+    vkDestroyShaderModule(device, frag, nullptr);
+    if (!ok) std::cerr << "[VulkanSceneRenderer] No se pudo crear el pipeline de profundidad del path tracing" << std::endl;
+    return ok;
+}
+
+bool VulkanSceneRenderer::ResolvePathTracingDepth(VkCommandBuffer cmd, uint32_t slot, uint32_t width, uint32_t height) {
+    const VulkanTexture& src = m_RtGI.GetPtDepthInst(m_RtGI.GetPtCurrPingPongIndex());
+    if (!src.IsValid() || m_PtDepthPipeline == VK_NULL_HANDLE || slot >= kFrameSlots) return false;
+
+    VkImageMemoryBarrier depthBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    depthBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    depthBarrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    depthBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    depthBarrier.image = src.GetImage();
+    depthBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &depthBarrier);
+
+    VkDescriptorImageInfo img{ src.GetSampler(), src.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    write.dstSet = m_PtDepthSets[slot];
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &img;
+    vkUpdateDescriptorSets(m_Context->GetDevice(), 1, &write, 0, nullptr);
+
+    VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), m_GBufDepthLayout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    m_GBufDepthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkRenderingAttachmentInfo depthAtt{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    depthAtt.imageView = m_GBufDepth.GetImageView();
+    depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderInfo{ VK_STRUCTURE_TYPE_RENDERING_INFO };
+    renderInfo.renderArea = { { 0, 0 }, { width, height } };
+    renderInfo.layerCount = 1;
+    renderInfo.pDepthAttachment = &depthAtt;
+    vkCmdBeginRendering(cmd, &renderInfo);
+    VkViewport vp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
+    VkRect2D scissor{ { 0, 0 }, { width, height } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_PtDepthPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_PtDepthPipeLayout, 0, 1, &m_PtDepthSets[slot], 0, nullptr);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+
+    VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    m_GBufDepthLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     return true;
 }
 
@@ -1134,6 +1294,7 @@ bool VulkanSceneRenderer::EnsureRenderTargets(uint32_t width, uint32_t height) {
     m_Height = height;
     m_TargetsInitialized = true;
     m_BloomInitialized = false;
+    m_GBufDepthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     for (uint32_t i = 0; i < kFrameSlots; ++i) {
         m_ComputeDescriptorsDirty[i] = true;
         m_BloomDescriptorsDirty[i] = true;
@@ -1160,6 +1321,7 @@ void VulkanSceneRenderer::DestroyRenderTargets() {
     m_Height = 0;
     m_TargetsInitialized = false;
     m_BloomInitialized = false;
+    m_GBufDepthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 void VulkanSceneRenderer::UpdateComputeDescriptors(uint32_t slot, VkImageView tonemapTargetView, uint64_t targetGeneration) {
@@ -1641,7 +1803,8 @@ bool VulkanSceneRenderer::RenderParticles(
 
     // HDR (GENERAL tras el compute de iluminacion) -> color attachment; depth -> attachment (solo lectura via depthWrite off)
     VulkanTexture::TransitionImageLayout(cmd, m_HdrColor.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-    VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), m_GBufDepthLayout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    m_GBufDepthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkRenderingAttachmentInfo colorAtt{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     colorAtt.imageView = m_HdrColor.GetImageView();
@@ -1679,6 +1842,7 @@ bool VulkanSceneRenderer::RenderParticles(
 
     VulkanTexture::TransitionImageLayout(cmd, m_HdrColor.GetImage(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    m_GBufDepthLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     m_LastDrawCallCount += static_cast<uint32_t>(batches.size());
     return true;
 }
@@ -1943,7 +2107,10 @@ bool VulkanSceneRenderer::RenderScene(
 
         if (!hasGBuffer && !m_BloomInitialized) {
             VulkanTexture::TransitionImageLayout(cmd, m_GBufMetalEmissive.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-            VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            if (m_GBufDepthLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+                m_GBufDepthLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
         }
 
         const bool runBloom = (post.bloom && post.bloomIntensity > 0.001f) ||
@@ -2034,7 +2201,10 @@ bool VulkanSceneRenderer::RenderScene(
                 sceneStateHash,
                 gfx))
         {
-            VulkanTexture::TransitionImageLayout(cmd, m_HdrColor.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+            ResolvePathTracingDepth(cmd, slot, width, height);
+            if (!RenderParticles(cmd, slot, level, view, viewProj, cameraPos, width, height)) {
+                VulkanTexture::TransitionImageLayout(cmd, m_HdrColor.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+            }
             runPostProcessAndTonemap(false);
             return true;
         }
@@ -2047,7 +2217,8 @@ bool VulkanSceneRenderer::RenderScene(
     VulkanTexture::TransitionImageLayout(cmd, m_GBufNormalRough.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     VulkanTexture::TransitionImageLayout(cmd, m_GBufMetalEmissive.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     VulkanTexture::TransitionImageLayout(cmd, m_GBufMotion.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-    VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), m_GBufDepthLayout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    m_GBufDepthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     std::array<VkRenderingAttachmentInfo, 4> colorAtts{};
     auto setupColorAtt = [](VkRenderingAttachmentInfo& att, VkImageView view) {
@@ -2110,6 +2281,7 @@ bool VulkanSceneRenderer::RenderScene(
     VulkanTexture::TransitionImageLayout(cmd, m_GBufMetalEmissive.GetImage(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     VulkanTexture::TransitionImageLayout(cmd, m_GBufMotion.GetImage(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
     VulkanTexture::TransitionImageLayout(cmd, m_GBufDepth.GetImage(), VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    m_GBufDepthLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     // ------------------------------------------------------------------------
     // Pass 2A: Hardware Ray-Traced GI + Temporal/Spatial Denoiser

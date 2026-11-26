@@ -427,7 +427,7 @@ layout(set = 1, binding = 5) uniform GiParamsUBO {
 layout(set = 1, binding = 6, rgba16f) uniform writeonly image2D uPtNormalRoughOut;
 layout(set = 1, binding = 7, rgba16f) uniform image2D uPtAlbedoOut;
 layout(set = 1, binding = 8, rgba16f) uniform image2D uPtEmissiveOut;
-layout(set = 1, binding = 9, rg32f)   uniform writeonly image2D uPtDepthInstOut;
+layout(set = 1, binding = 9, rgba32f) uniform writeonly image2D uPtDepthInstOut;
 layout(set = 1, binding = 10, rg16f)  uniform writeonly image2D uPtMotionOut;
 layout(set = 1, binding = 11, rgba16f) uniform image2D uPtSpecAccum;
 const float PI = 3.14159265359;
@@ -555,6 +555,20 @@ void EvaluateBRDFSplit(vec3 N, vec3 V, vec3 L, vec3 rad, vec3 albedo, float roug
 vec3 EvaluateBRDF(vec3 N, vec3 V, vec3 L, vec3 rad, vec3 albedo, float rough, float metal) {
     vec3 dI, sR; EvaluateBRDFSplit(N, V, L, rad, albedo, rough, metal, dI, sR); return dI * albedo + sR;
 }
+vec3 ApplyNormalMap(vec3 geomN, vec3 localT, vec3 localB, mat4x3 worldToObj, vec2 uv, GpuMaterialData mat) {
+    vec3 N = geomN;
+    if (mat.texIndices0.y < 0 || dot(localT, localT) < 1e-8 || dot(localB, localB) < 1e-8) return N;
+    mat3 objToWorld = inverse(mat3(worldToObj));
+    vec3 T = objToWorld * localT; vec3 B = objToWorld * localB;
+    T = T - N * dot(T, N); B = B - N * dot(B, N);
+    if (dot(T, T) < 1e-8 || dot(B, B) < 1e-8) return N;
+    T = normalize(T); B = normalize(B - T * dot(B, T));
+    if (dot(B, B) < 1e-8) return N;
+    if (dot(cross(N, T), B) < 0.0) B = -B;
+    vec3 mapN = textureLod(uTextures[nonuniformEXT(mat.texIndices0.y)], uv, 0.0).xyz * 2.0 - 1.0;
+    mapN.xy *= mat.pbrParams.w;
+    return normalize(mat3(T, B, N) * mapN);
+}
 void BuildBasis(vec3 N, out vec3 T, out vec3 B) { vec3 up = abs(N.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0); T = normalize(cross(up, N)); B = cross(N, T); }
 vec3 SampleCosineHemisphere(vec3 N, float u1, float u2) { float r = sqrt(max(u1, 0.0)); float th = 2.0 * PI * u2; vec3 T, B; BuildBasis(N, T, B); return normalize(T * (r * cos(th)) + B * (r * sin(th)) + N * sqrt(max(1.0 - u1, 0.0))); }
 vec3 SampleGGXHalfVector(vec3 N, float r, float u1, float u2) { float a = r * r; float phi = 2.0 * PI * u1; float cosT = sqrt((1.0 - u2) / max(1.0 + (a * a - 1.0) * u2, 1e-5)); float sinT = sqrt(max(1.0 - cosT * cosT, 0.0)); vec3 T, B; BuildBasis(N, T, B); return normalize(T * (cos(phi) * sinT) + B * (sin(phi) * sinT) + N * cosT); }
@@ -615,7 +629,7 @@ void main() {
     int maxB = clamp(uGi.giBounces, 1, 8);
     vec3 accumDiffIrr = vec3(0.0); vec3 accumSpecRad = vec3(0.0); vec3 accumAlbedo = vec3(0.0); vec3 accumEmissive = vec3(0.0);
     vec3 primaryNormOut = vec3(0.0); float primaryRoughOut = 1.0; float primaryMetalOut = 0.0;
-    float primaryDepthOut = 0.0; float primaryInstOut = 0.0; vec2 primaryMotionOut = vec2(0.0);
+    float primaryDepthOut = 0.0; float primaryInstOut = 0.0; float primaryWindowZ = 1.0; vec2 primaryMotionOut = vec2(0.0);
     for (uint sIdx = 0u; sIdx < spp; ++sIdx) {
         uint seqIndex = (max(uGi.frameIndex, 1u) - 1u) * spp + sIdx;
         vec2 bnPrimary = SampleBlueNoise2D(pix, seqIndex, 0u);
@@ -641,7 +655,9 @@ void main() {
                     }
                     break;
                 }
-                float tHit = rayQueryGetIntersectionTEXT(rq, true);
+)GLSL";
+
+const char* kFallbackPathtraceCompC = R"GLSL(                float tHit = rayQueryGetIntersectionTEXT(rq, true);
                 uint instIdx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
                 uint primIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
                 vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
@@ -655,16 +671,24 @@ void main() {
                 vec3 localN = normalize(vec3(vBuf.data[b0+3u], vBuf.data[b0+4u], vBuf.data[b0+5u]) * w.x +
                                         vec3(vBuf.data[b1+3u], vBuf.data[b1+4u], vBuf.data[b1+5u]) * w.y +
                                         vec3(vBuf.data[b2+3u], vBuf.data[b2+4u], vBuf.data[b2+5u]) * w.z);
-                vec3 N = normalize(transpose(mat3(rayQueryGetIntersectionWorldToObjectEXT(rq, true))) * localN);
+                vec3 localT = vec3(vBuf.data[b0+10u], vBuf.data[b0+11u], vBuf.data[b0+12u]) * w.x +
+                              vec3(vBuf.data[b1+10u], vBuf.data[b1+11u], vBuf.data[b1+12u]) * w.y +
+                              vec3(vBuf.data[b2+10u], vBuf.data[b2+11u], vBuf.data[b2+12u]) * w.z;
+                vec3 localB = vec3(vBuf.data[b0+13u], vBuf.data[b0+14u], vBuf.data[b0+15u]) * w.x +
+                              vec3(vBuf.data[b1+13u], vBuf.data[b1+14u], vBuf.data[b1+15u]) * w.y +
+                              vec3(vBuf.data[b2+13u], vBuf.data[b2+14u], vBuf.data[b2+15u]) * w.z;
+                mat4x3 worldToObj = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
+                vec3 N = normalize(transpose(mat3(worldToObj)) * localN);
                 if (dot(N, -rd) < 0.0) N = -N;
                 vec2 hitUv = vec2(vBuf.data[b0+6u], vBuf.data[b0+7u]) * w.x +
                              vec2(vBuf.data[b1+6u], vBuf.data[b1+7u]) * w.y +
                              vec2(vBuf.data[b2+6u], vBuf.data[b2+7u]) * w.z;
                 vec3 hitPos = ro + rd * tHit; vec3 V = -rd;
                 GpuMaterialData mat = uMaterials.materials[info.materialIndex];
+                N = ApplyNormalMap(N, localT, localB, worldToObj, hitUv, mat);
                 vec3 hitAlbedo = mat.albedoColor.rgb;
                 if (mat.texIndices0.x >= 0) hitAlbedo *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.x)], hitUv, 0.0).rgb;
-                hitAlbedo = pow(clamp(hitAlbedo, vec3(0.0), vec3(1.0)), vec3(2.2));
+                hitAlbedo = max(hitAlbedo, vec3(0.0));
                 float rough = clamp(mat.pbrParams.x, 0.04, 1.0);
                 if (mat.texIndices0.z >= 0) rough *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.z)], hitUv, 0.0).g;
                 if (mat.extraParams.z > 0.5) rough = 1.0 - rough;
@@ -676,7 +700,7 @@ void main() {
                 if (mat.texIndices1.y >= 0) hitEmis *= textureLod(uTextures[nonuniformEXT(mat.texIndices1.y)], hitUv, 0.0).rgb;
                 vec3 F0 = mix(vec3(0.04), hitAlbedo, metal);
                 if (b == 0) {
-                    primaryAlb = max(hitAlbedo, vec3(0.02));
+                    primaryAlb = hitAlbedo;
                     primaryEmis = hitEmis;
                     if (sIdx == 0u) {
                         primaryNormOut = N; primaryRoughOut = rough; primaryMetalOut = metal;
@@ -688,6 +712,7 @@ void main() {
                         vec4 cC = uScene.currViewProj * vec4(hitPos, 1.0);
                         vec4 pC = uScene.prevViewProj * vec4(prevW, 1.0);
                         primaryMotionOut = ((cC.xy / max(abs(cC.w), 1e-6)) - (pC.xy / max(abs(pC.w), 1e-6))) * 0.5;
+                        primaryWindowZ = clamp(cC.z / max(abs(cC.w), 1e-6), 0.0, 1.0);
                     }
                 } else {
                     if (firstIsSpec) sSpecRad += tp * hitEmis; else sDiffIrr += tp * hitEmis;
@@ -752,7 +777,7 @@ void main() {
     imageStore(uPtNormalRoughOut, pix, vec4(primaryNormOut, primaryRoughOut));
     imageStore(uPtAlbedoOut, pix, vec4(outAlbedo, primaryMetalOut));
     imageStore(uPtEmissiveOut, pix, vec4(outEmissive, 1.0));
-    imageStore(uPtDepthInstOut, pix, vec4(primaryDepthOut, primaryInstOut, 0.0, 0.0));
+    imageStore(uPtDepthInstOut, pix, vec4(primaryDepthOut, primaryInstOut, primaryWindowZ, 0.0));
     imageStore(uPtMotionOut, pix, vec4(primaryMotionOut, 0.0, 0.0));
     imageStore(uPtAccum, pix, vec4(outDiffIrr, 1.0));
     imageStore(uPtSpecAccum, pix, vec4(outSpecRad, 1.0));
@@ -1515,7 +1540,7 @@ bool VulkanRayTracedGI::CreatePipelines(VulkanContext* context, VkDescriptorSetL
 
     // 3. Path Tracing Compute Pipeline
     {
-        std::string src = LoadShaderTextWithFallback("shaders/vulkan/pathtrace.comp", std::string(kFallbackPathtraceCompA) + kFallbackPathtraceCompB);
+        std::string src = LoadShaderTextWithFallback("shaders/vulkan/pathtrace.comp", std::string(kFallbackPathtraceCompA) + kFallbackPathtraceCompB + kFallbackPathtraceCompC);
         VkShaderModule mod = CompileComputeModule(device, src, "pathtrace.comp");
         if (mod == VK_NULL_HANDLE) return false;
 
@@ -1752,7 +1777,7 @@ bool VulkanRayTracedGI::EnsureSize(VulkanContext* context, uint32_t width, uint3
     if (!m_PtEmissive.CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     for (int p = 0; p < 2; ++p) {
         if (!m_PtNormalRough[p].CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
-        if (!m_PtDepthInst[p].CreateImage2D(context, width, height, VK_FORMAT_R32G32_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
+        if (!m_PtDepthInst[p].CreateImage2D(context, width, height, VK_FORMAT_R32G32B32A32_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
         if (!m_PtIrradianceHistory[p].CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_LINEAR)) return false;
         if (!m_PtSpecularHistory[p].CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_LINEAR)) return false;
         if (!m_PtMomentsHistory[p].CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_LINEAR)) return false;
