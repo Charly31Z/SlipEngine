@@ -1,0 +1,307 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// NRD ReBLUR-style Hit-Distance Temporal Accumulation + Fast-History Anti-Lag + Virtual-Position Specular Reprojection
+struct GpuDirLight { vec4 directionIntensity; vec4 colorPad; };
+struct GpuPointLight { vec4 positionRange; vec4 colorIntensity; };
+struct GpuSpotLight { vec4 positionRange; vec4 directionCosOuter; vec4 colorIntensityCosIn; };
+
+layout(set = 0, binding = 0) uniform sampler2D uCurrRawIrr;
+layout(set = 0, binding = 1) uniform sampler2D uCurrNormalRough;
+layout(set = 0, binding = 2) uniform sampler2D uCurrDepthInst;
+layout(set = 0, binding = 3) uniform sampler2D uMotionTex;
+layout(set = 0, binding = 4) uniform sampler2D uPrevIrrHistory;   // .rgb = diffIrr, .a = normDiffHitDist
+layout(set = 0, binding = 5) uniform sampler2D uPrevMoments;      // .r = fastDiffLuma, .g = diffMom2, .b = histLen, .a = fastSpecLuma
+layout(set = 0, binding = 6) uniform sampler2D uPrevNormalRough;
+layout(set = 0, binding = 7) uniform sampler2D uPrevDepthInst;
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D uCurrIrrHistoryOut;
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D uCurrMomentsOut;
+layout(set = 0, binding = 10) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+    int  restirDIEnabled;
+    int  restirGIEnabled;
+    int  denoiserMode;
+    float specVirtualParallax;
+} uGi;
+layout(set = 0, binding = 11) uniform sampler2D uCurrRawSpec;
+layout(set = 0, binding = 12) uniform sampler2D uPrevSpecHistory; // .rgb = specRad, .a = normSpecHitDist
+layout(set = 0, binding = 13, rgba16f) uniform writeonly image2D uCurrSpecHistoryOut;
+layout(set = 0, binding = 14) uniform sampler2D uHitDistDepth;    // .r=diffHitT, .g=specHitT, .b=windowZ, .a=prevLinearDepth
+layout(set = 0, binding = 15) uniform SceneLightingUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 skyZenith;
+    vec4 skyHorizon;
+    vec4 skyGround;
+    vec4 sunDirIntensity;
+    vec4 sunColorParams;
+    ivec4 counts;
+    GpuDirLight dirLights[4];
+    GpuPointLight pointLights[32];
+    GpuSpotLight spotLights[16];
+    vec4 cloudParams0;
+    vec4 cloudParams1;
+    vec4 cloudParams2;
+    vec4 cloudAmbient;
+    mat4 currViewProj;
+    mat4 prevViewProj;
+} uScene;
+
+float Luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// NRD ReBLUR hit-distance normalization: h_norm = hitT / (hitT + scale(viewZ, roughness))
+float NormalizeHitDist(float hitT, float viewZ, float roughness) {
+    float scale = (1.5 + viewZ * 0.12) * mix(1.0, 0.25, 1.0 - roughness);
+    return clamp(hitT / max(hitT + scale, 1e-4), 0.0, 1.0);
+}
+
+vec3 RGBToYCoCg(vec3 c) {
+    return vec3(
+        0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+        0.5  * c.r             - 0.5  * c.b,
+       -0.25 * c.r + 0.5 * c.g - 0.25 * c.b
+    );
+}
+
+vec3 YCoCgToRGB(vec3 ycc) {
+    float t = ycc.x - ycc.z;
+    return max(vec3(t + ycc.y, ycc.x + ycc.z, t - ycc.y), vec3(0.0));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uCurrIrrHistoryOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    vec3 currIrr = max(texelFetch(uCurrRawIrr, pix, 0).rgb, vec3(0.0));
+    if (any(isnan(currIrr)) || any(isinf(currIrr))) currIrr = vec3(0.0);
+
+    vec3 currSpec = max(texelFetch(uCurrRawSpec, pix, 0).rgb, vec3(0.0));
+    if (any(isnan(currSpec)) || any(isinf(currSpec))) currSpec = vec3(0.0);
+
+    vec2 currDI = texelFetch(uCurrDepthInst, pix, 0).rg;
+    float currDepth = currDI.x;
+    float currInst  = currDI.y;
+    if (currDepth <= 0.0001) {
+        imageStore(uCurrIrrHistoryOut, pix, vec4(currIrr, 1.0));
+        imageStore(uCurrSpecHistoryOut, pix, vec4(currSpec, 1.0));
+        imageStore(uCurrMomentsOut, pix, vec4(0.0));
+        return;
+    }
+
+    vec4 currNR = texelFetch(uCurrNormalRough, pix, 0);
+    vec3 currN = normalize(currNR.xyz);
+    float currRough = clamp(currNR.w, 0.04, 1.0);
+
+    vec4 hitData = texelFetch(uHitDistDepth, pix, 0);
+    float diffHitT = clamp(hitData.r, 0.0, 500.0);
+    float specHitT = clamp(hitData.g, 0.0, 500.0);
+    float windowZ  = clamp(hitData.b, 0.0, 1.0);
+    float refDepth = (hitData.a > 0.0001 && !isnan(hitData.a) && !isinf(hitData.a)) ? hitData.a : currDepth;
+
+    float currDiffNormHit = NormalizeHitDist(diffHitT, currDepth, 1.0);
+    float currSpecNormHit = NormalizeHitDist(specHitT, currDepth, currRough);
+
+    // 3x3 YCoCg statistics for anti-firefly and chroma-preserving history bounding
+    vec3 diffYccM1 = vec3(0.0), diffYccM2 = vec3(0.0);
+    vec3 specYccM1 = vec3(0.0), specYccM2 = vec3(0.0);
+    float nCnt = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 np = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
+            vec3 di = max(texelFetch(uCurrRawIrr, np, 0).rgb, vec3(0.0));
+            vec3 sp = max(texelFetch(uCurrRawSpec, np, 0).rgb, vec3(0.0));
+            if (any(isnan(di)) || any(isinf(di)) || any(isnan(sp)) || any(isinf(sp))) continue;
+            vec3 dyc = RGBToYCoCg(di);
+            vec3 syc = RGBToYCoCg(sp);
+            diffYccM1 += dyc; diffYccM2 += dyc * dyc;
+            specYccM1 += syc; specYccM2 += syc * syc;
+            nCnt += 1.0;
+        }
+    }
+    diffYccM1 /= max(nCnt, 1.0);
+    specYccM1 /= max(nCnt, 1.0);
+    vec3 diffSigma = sqrt(max(diffYccM2 / max(nCnt, 1.0) - diffYccM1 * diffYccM1, vec3(0.0)));
+    vec3 specSigma = sqrt(max(specYccM2 / max(nCnt, 1.0) - specYccM1 * specYccM1, vec3(0.0)));
+
+    float currLuma = Luminance(currIrr);
+    float currSpecLuma = Luminance(currSpec);
+
+    float dRight = texelFetch(uCurrDepthInst, min(pix + ivec2(1, 0), size - ivec2(1)), 0).r;
+    float dUp    = texelFetch(uCurrDepthInst, min(pix + ivec2(0, 1), size - ivec2(1)), 0).r;
+    float gradMag = length(vec2(abs(dRight - currDepth), abs(dUp - currDepth)));
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    vec2 motion = texelFetch(uMotionTex, pix, 0).rg;
+    if (any(isnan(motion)) || any(isinf(motion))) motion = vec2(0.0);
+    vec2 prevUv = uv - motion;
+
+    const ivec2 offsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
+    vec4 prevDiffSum = vec4(0.0);
+    vec4 prevMomSum  = vec4(0.0);
+    float wDiffSum   = 0.0;
+
+    vec4 surfSpecSum = vec4(0.0);
+    float surfFastSpecSum = 0.0;
+    float wSurfSpecSum = 0.0;
+
+    if (uGi.frameIndex > 1u && prevUv.x >= 0.0 && prevUv.x <= 1.0 && prevUv.y >= 0.0 && prevUv.y <= 1.0) {
+        vec2 prevPixF = prevUv * vec2(size) - 0.5;
+        ivec2 baseP = ivec2(floor(prevPixF));
+        vec2 f = fract(prevPixF);
+        float bw[4] = float[4]((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+
+        for (int i = 0; i < 4; ++i) {
+            ivec2 q = baseP + offsets[i];
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            vec2 qDI = texelFetch(uPrevDepthInst, q, 0).rg;
+            if (qDI.x <= 0.0001 || abs(currInst - qDI.y) > 0.5) continue;
+
+            vec4 qNR = texelFetch(uPrevNormalRough, q, 0);
+            vec3 qN = normalize(qNR.xyz);
+            float nDot = dot(currN, qN);
+            if (nDot < 0.90) continue;
+
+            if (abs(refDepth - qDI.x) > 0.012 * refDepth + 1.5 * gradMag + 0.004) continue;
+
+            vec4 qDiff = texelFetch(uPrevIrrHistory, q, 0);
+            vec4 qMom  = texelFetch(uPrevMoments, q, 0);
+            if (qMom.z < 0.5 || any(isnan(qDiff)) || any(isinf(qDiff))) continue;
+
+            float w = bw[i];
+            prevDiffSum += max(qDiff, vec4(0.0)) * w;
+            prevMomSum  += max(qMom, vec4(0.0)) * w;
+            wDiffSum    += w;
+
+            float qRough = clamp(qNR.w, 0.04, 1.0);
+            if (nDot >= mix(0.985, 0.92, smoothstep(0.05, 0.45, currRough)) && abs(currRough - qRough) < 0.14) {
+                vec4 qSpec = texelFetch(uPrevSpecHistory, q, 0);
+                if (!any(isnan(qSpec)) && !any(isinf(qSpec))) {
+                    surfSpecSum     += max(qSpec, vec4(0.0)) * w;
+                    surfFastSpecSum += qMom.a * w;
+                    wSurfSpecSum    += w;
+                }
+            }
+        }
+    }
+
+    // Virtual Reflected Position Reprojection for ReBLUR Specular
+    vec4 virtSpecSum = vec4(0.0);
+    float virtFastSpecSum = 0.0;
+    float wVirtSpecSum = 0.0;
+    float parallaxFactor = (1.0 - smoothstep(0.04, 0.35, currRough)) * clamp(uGi.specVirtualParallax, 0.0, 1.0);
+
+    if (uGi.frameIndex > 1u && parallaxFactor > 0.02 && specHitT > 0.005) {
+        vec4 wPos4 = uScene.invViewProj * vec4(uv * 2.0 - 1.0, windowZ, 1.0);
+        vec3 hitPos = wPos4.xyz / max(abs(wPos4.w), 1e-6);
+        vec3 viewDir = normalize(hitPos - uScene.cameraPos.xyz);
+        vec3 virtualPos = hitPos + viewDir * specHitT;
+        vec4 virtPrevClip = uScene.prevViewProj * vec4(virtualPos, 1.0);
+        vec2 virtPrevUv = (virtPrevClip.xy / max(abs(virtPrevClip.w), 1e-6)) * 0.5 + 0.5;
+
+        if (virtPrevUv.x >= 0.0 && virtPrevUv.x <= 1.0 && virtPrevUv.y >= 0.0 && virtPrevUv.y <= 1.0) {
+            vec2 vPixF = virtPrevUv * vec2(size) - 0.5;
+            ivec2 vBaseP = ivec2(floor(vPixF));
+            vec2 vf = fract(vPixF);
+            float vbw[4] = float[4]((1.0 - vf.x) * (1.0 - vf.y), vf.x * (1.0 - vf.y), (1.0 - vf.x) * vf.y, vf.x * vf.y);
+
+            for (int i = 0; i < 4; ++i) {
+                ivec2 q = vBaseP + offsets[i];
+                if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+                vec2 qDI = texelFetch(uPrevDepthInst, q, 0).rg;
+                if (qDI.x <= 0.0001 || abs(currInst - qDI.y) > 0.5) continue;
+                vec4 qNR = texelFetch(uPrevNormalRough, q, 0);
+                if (dot(currN, normalize(qNR.xyz)) < 0.992 || abs(currRough - clamp(qNR.w, 0.04, 1.0)) > 0.08) continue;
+                vec4 qSpec = texelFetch(uPrevSpecHistory, q, 0);
+                vec4 qMom  = texelFetch(uPrevMoments, q, 0);
+                if (qMom.z < 0.5 || any(isnan(qSpec)) || any(isinf(qSpec))) continue;
+                float vw = vbw[i];
+                virtSpecSum     += max(qSpec, vec4(0.0)) * vw;
+                virtFastSpecSum += qMom.a * vw;
+                wVirtSpecSum    += vw;
+            }
+        }
+    }
+
+    vec3 outDiff = currIrr;
+    float outDiffNormHit = currDiffNormHit;
+    float outFastDiffLuma = currLuma;
+    float outDiffMom2 = currLuma * currLuma;
+    float outHistLen = 1.0;
+
+    if (wDiffSum > 0.01) {
+        vec4 histDiff = prevDiffSum / wDiffSum;
+        vec4 histMom  = prevMomSum / wDiffSum;
+        float disoccConf = smoothstep(0.05, 0.95, wDiffSum);
+        float histLen = min(1.0 + histMom.z * disoccConf, 32.0);
+
+        // ReBLUR Fast-History Anti-Lag: compare slow history luminance vs 4-frame fast history luminance
+        float fastAlpha = max(0.25, 1.0 / min(histLen, 4.0));
+        outFastDiffLuma = mix(histMom.r, currLuma, fastAlpha);
+        float histLuma = Luminance(histDiff.rgb);
+        float antiLagDelta = abs(histLuma - outFastDiffLuma) / max(max(histLuma, outFastDiffLuma) + 0.12, 1e-3);
+        float antiLag = smoothstep(0.35, 1.15, antiLagDelta) * smoothstep(6.5, 12.0, histLen) * 0.65;
+
+        // Wide YCoCg anti-firefly bounding
+        vec3 histYcc = RGBToYCoCg(histDiff.rgb);
+        histYcc = clamp(histYcc, diffYccM1 - diffSigma * 4.2 - vec3(0.15), diffYccM1 + diffSigma * 4.2 + vec3(0.25));
+        vec3 clampedHistDiff = YCoCgToRGB(histYcc);
+
+        float baseAlpha = clamp(uGi.giTemporalAlpha, 0.03, 0.35);
+        float alpha = clamp(max(baseAlpha + (1.0 - disoccConf) * 0.55 + antiLag, 1.0 / max(histLen, 1.0)), 0.03, 1.0);
+        outDiff = mix(clampedHistDiff, currIrr, alpha);
+        outDiffNormHit = mix(histDiff.a, currDiffNormHit, max(alpha, 0.15));
+        outDiffMom2 = mix(histMom.g, currLuma * currLuma, alpha);
+        outHistLen = mix(histLen, 2.0, antiLag);
+    }
+
+    vec3 outSpec = currSpec;
+    float outSpecNormHit = currSpecNormHit;
+    float outFastSpecLuma = currSpecLuma;
+
+    bool useVirt = (wVirtSpecSum > 0.25);
+    float wSpec = useVirt ? wVirtSpecSum : wSurfSpecSum;
+    if (wSpec > 0.01) {
+        vec4 histSpec = (useVirt ? virtSpecSum : surfSpecSum) / wSpec;
+        float prevFastSpec = (useVirt ? virtFastSpecSum : surfFastSpecSum) / wSpec;
+
+        float fastAlphaS = max(0.28, 1.0 / min(outHistLen, 4.0));
+        outFastSpecLuma = mix(prevFastSpec, currSpecLuma, fastAlphaS);
+        float sHistLuma = Luminance(histSpec.rgb);
+        float sAntiLag = smoothstep(0.35, 1.20, abs(sHistLuma - outFastSpecLuma) / max(max(sHistLuma, outFastSpecLuma) + 0.12, 1e-3)) * 0.60;
+
+        vec3 sYcc = RGBToYCoCg(histSpec.rgb);
+        float clampK = mix(2.2, 4.0, smoothstep(0.06, 0.45, currRough));
+        sYcc = clamp(sYcc, specYccM1 - specSigma * clampK - vec3(0.10), specYccM1 + specSigma * clampK + vec3(0.25));
+        vec3 clampedSpec = YCoCgToRGB(sYcc);
+
+        float specDisocc = smoothstep(0.05, 0.95, wSpec);
+        float motionLen = length(motion * vec2(size));
+        float mirrorBoost = useVirt ? 0.0 : ((1.0 - smoothstep(0.04, 0.22, currRough)) * clamp(motionLen * 0.16, 0.0, 0.48));
+        float alphaS = clamp(max(clamp(uGi.giTemporalAlpha, 0.04, 0.40) + mirrorBoost + (1.0 - specDisocc) * 0.55 + sAntiLag, 1.0 / max(outHistLen, 1.0)), 0.04, 0.90);
+
+        outSpec = mix(clampedSpec, currSpec, alphaS);
+        outSpecNormHit = mix(histSpec.a, currSpecNormHit, max(alphaS, 0.18));
+    }
+
+    imageStore(uCurrIrrHistoryOut, pix, vec4(outDiff, outDiffNormHit));
+    imageStore(uCurrSpecHistoryOut, pix, vec4(outSpec, outSpecNormHit));
+    imageStore(uCurrMomentsOut, pix, vec4(outFastDiffLuma, outDiffMom2, outHistLen, outFastSpecLuma));
+}

@@ -16,7 +16,9 @@ enum class GlobalIlluminationMode : int {
 
 enum class PathTracingMode : int {
     Progressive = 0,
-    RealtimeSVGF = 1
+    RealtimeSVGF = 1,
+    RealtimeNRD = 2,
+    RealtimeDLSSRR = 3
 };
 
 struct SLIPENGINE_API GraphicsSettingsData {
@@ -45,11 +47,15 @@ struct SLIPENGINE_API GraphicsSettingsData {
     bool giRayTracedShadows = true;   // Sombras por ray query en RTGI
     int ptMaxSamples = 256;           // Máximo de muestras en Path Tracing (0 = ilimitado)
 
-    // Calibración en vivo del Denoiser SVGF (Path Tracing en Tiempo Real)
+    // Calibración en vivo del Denoiser SVGF / NRD ReBLUR / ReSTIR / DLSS-RR (Path Tracing en Tiempo Real)
     int svgfAtrousIterations = 3;     // 1..5 (default 3 para preservar sombras de contacto)
     float svgfSigmaLuminance = 2.0f;  // 0.5..5.0 (default 2.0 para respetar bordes de sombra)
     float svgfSigmaNormal = 128.0f;   // 16..256 (default 128.0 para no mezclar caras iluminadas/sombra)
     float svgfSigmaDepth = 1.5f;      // 0.5..4.0 (default 1.5 para penalizar saltos de profundidad)
+    bool restirDIEnabled = true;      // ReSTIR DI: Resampling espacio-temporal de iluminación directa (RIS + Temporal + Espacial)
+    bool restirGIEnabled = true;      // ReSTIR GI: Resampling espacio-temporal con Jacobiano para iluminación indirecta
+    float specVirtualParallax = 1.0f; // 0..1 fuerza de reproyección por posición virtual del reflejo especular
+    int dlssQualityMode = 1;          // 0 = DLAA, 1 = Calidad, 2 = Equilibrado, 3 = Rendimiento (Streamline DLSS-RR)
 
     // SSR (Screen Space Reflections)
     bool ssrEnabled = true;

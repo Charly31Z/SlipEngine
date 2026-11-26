@@ -1,0 +1,546 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct GpuDirLight { vec4 directionIntensity; vec4 colorPad; };
+struct GpuPointLight { vec4 positionRange; vec4 colorIntensity; };
+struct GpuSpotLight { vec4 positionRange; vec4 directionCosOuter; vec4 colorIntensityCosIn; };
+
+struct GpuDIReservoir {
+    uint  lightInfo;   // bits [0..15] = lightIdx, bits [16..19] = lightType (0=None, 1=Dir, 2=Point, 3=Spot)
+    uint  M;
+    float weightSum;   // finalized reservoir stores unbiased contribution weight W
+    float targetPdf;
+    vec2  lightRandUV;
+    vec2  pad;
+};
+
+struct GpuGIReservoir {
+    vec4 samplePosDist;     // .xyz = sampleHitPos (or skyDir if sky), .w = hitDist
+    vec4 sampleNormType;    // .xyz = sampleHitNormal, .w = hitType (0=invalid, 1=surface, 2=sky)
+    vec4 radianceTargetPdf; // .rgb = outgoing radiance Lo at sample point, .a = targetPdf
+    vec4 weights;           // .x = W, .y = M, .z = 0, .w = 0
+};
+
+layout(set = 0, binding = 0)  uniform sampler2D uCurrNormalRough;
+layout(set = 0, binding = 1)  uniform sampler2D uCurrDepthInst;
+layout(set = 0, binding = 2)  uniform sampler2D uPrevNormalRough;
+layout(set = 0, binding = 3)  uniform sampler2D uPrevDepthInst;
+layout(set = 0, binding = 4)  uniform sampler2D uMotionTex;
+layout(set = 0, binding = 5)  uniform sampler2D uAlbedoTex;
+layout(set = 0, binding = 6)  uniform sampler2D uHitDistDepthTex;
+layout(set = 0, binding = 7)  uniform accelerationStructureEXT uTLAS;
+layout(set = 0, binding = 8)  uniform SceneLightingUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 skyZenith;
+    vec4 skyHorizon;
+    vec4 skyGround;
+    vec4 sunDirIntensity;
+    vec4 sunColorParams;
+    ivec4 counts;
+    GpuDirLight dirLights[4];
+    GpuPointLight pointLights[32];
+    GpuSpotLight spotLights[16];
+    vec4 cloudParams0;
+    vec4 cloudParams1;
+    vec4 cloudParams2;
+    vec4 cloudAmbient;
+    mat4 currViewProj;
+    mat4 prevViewProj;
+} uScene;
+layout(set = 0, binding = 9)  uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+    int  restirDIEnabled;
+    int  restirGIEnabled;
+    int  denoiserMode;
+    float specVirtualParallax;
+} uGi;
+layout(set = 0, binding = 10, std430) readonly  buffer DiCurrBuf    { GpuDIReservoir reservoirs[]; } uDiCurr;
+layout(set = 0, binding = 11, std430) readonly  buffer DiPrevBuf    { GpuDIReservoir reservoirs[]; } uDiPrev;
+layout(set = 0, binding = 12, std430) writeonly buffer DiHistOutBuf { GpuDIReservoir reservoirs[]; } uDiHistOut;
+layout(set = 0, binding = 13, std430) readonly  buffer GiCurrBuf    { GpuGIReservoir reservoirs[]; } uGiCurr;
+layout(set = 0, binding = 14, std430) readonly  buffer GiPrevBuf    { GpuGIReservoir reservoirs[]; } uGiPrev;
+layout(set = 0, binding = 15, std430) writeonly buffer GiHistOutBuf { GpuGIReservoir reservoirs[]; } uGiHistOut;
+layout(set = 0, binding = 16, rgba16f) uniform image2D uPtAccum;
+layout(set = 0, binding = 17, rgba16f) uniform image2D uPtSpecAccum;
+
+const float PI = 3.14159265359;
+
+uint PcgHash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float Rand01(inout uint seed) {
+    seed = PcgHash(seed);
+    return float(seed) * (1.0 / 4294967296.0);
+}
+
+float Luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void BuildOrthonormalBasis(vec3 N, out vec3 T, out vec3 B) {
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    T = normalize(cross(up, N));
+    B = cross(N, T);
+}
+
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float denom = (NdotH * NdotH * (a2 - 1.0) + 1.0);
+    return a2 / max(PI * denom * denom, 1e-5);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotV / max(NdotV * (1.0 - k) + k, 1e-5);
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    return GeometrySchlickGGX(max(dot(N, V), 0.0), roughness) *
+           GeometrySchlickGGX(max(dot(N, L), 0.0), roughness);
+}
+
+vec3 FresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+void EvaluateBRDFSplit(vec3 N, vec3 V, vec3 L, vec3 rad, vec3 albedo, float rough, float metal, out vec3 outDiffIrr, out vec3 outSpecRad) {
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL <= 0.0) {
+        outDiffIrr = vec3(0.0);
+        outSpecRad = vec3(0.0);
+        return;
+    }
+    vec3 H = normalize(V + L);
+    vec3 F0 = mix(vec3(0.04), albedo, metal);
+    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
+    vec3 spec = (DistributionGGX(N, H, rough) * GeometrySmith(N, V, L, rough) * F) /
+                max(4.0 * max(dot(N, V), 0.0) * NdotL, 0.001);
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metal);
+    outDiffIrr = (kD / PI) * rad * NdotL;
+    outSpecRad = spec * rad * NdotL;
+}
+
+bool TraceVisibility(vec3 origin, vec3 dir, float tMin, float tMax) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFFu, origin, tMin, dir, tMax);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+vec3 ReconstructWorldPos(vec2 uv, float windowZ) {
+    vec4 w = uScene.invViewProj * vec4(uv * 2.0 - 1.0, windowZ, 1.0);
+    return w.xyz / max(abs(w.w), 1e-6);
+}
+
+bool EvaluateLightSample(
+    uint lightInfo, vec2 uvRand,
+    vec3 hitPos, vec3 N, vec3 V, vec3 albedo, float rough, float metal,
+    out vec3 outL, out float outMaxT, out vec3 outDiffIrr, out vec3 outSpecRad, out float outTargetPdf)
+{
+    outL = vec3(0.0, 1.0, 0.0);
+    outMaxT = 0.0;
+    outDiffIrr = vec3(0.0);
+    outSpecRad = vec3(0.0);
+    outTargetPdf = 0.0;
+
+    uint lIdx  = lightInfo & 0xFFFFu;
+    uint lType = (lightInfo >> 16u) & 0xFu;
+    vec3 rad = vec3(0.0);
+
+    if (lType == 1u) {
+        if (int(lIdx) >= clamp(uScene.counts.x, 0, 4)) return false;
+        vec3 baseL = normalize(-uScene.dirLights[lIdx].directionIntensity.xyz);
+        vec3 L = baseL;
+        float coneRadius = clamp(uScene.sunColorParams.w * 0.35, 0.004, 0.025);
+        if (lIdx == 0u && coneRadius > 0.0001) {
+            vec3 sunT, sunB;
+            BuildOrthonormalBasis(baseL, sunT, sunB);
+            float rDisk = sqrt(max(uvRand.x, 0.0)) * coneRadius;
+            float phiDisk = 2.0 * PI * uvRand.y;
+            vec3 jitterL = normalize(baseL + (sunT * cos(phiDisk) + sunB * sin(phiDisk)) * rDisk);
+            if (dot(N, jitterL) > 0.0) L = jitterL;
+        }
+        if (dot(N, L) <= 0.0) return false;
+        outL = L;
+        outMaxT = 500.0;
+        rad = uScene.dirLights[lIdx].colorPad.rgb * uScene.dirLights[lIdx].directionIntensity.w;
+    } else if (lType == 2u) {
+        if (int(lIdx) >= clamp(uScene.counts.y, 0, 32)) return false;
+        vec3 toL = uScene.pointLights[lIdx].positionRange.xyz - hitPos;
+        float dist = length(toL);
+        float range = max(uScene.pointLights[lIdx].positionRange.w, 0.001);
+        if (dist >= range) return false;
+        vec3 L = toL / max(dist, 1e-4);
+        if (dot(N, L) <= 0.0) return false;
+        float att = clamp(1.0 - (dist / range), 0.0, 1.0);
+        att = (att * att) / (1.0 + 0.1 * dist * dist);
+        outL = L;
+        outMaxT = max(dist - 0.01, 0.003);
+        rad = uScene.pointLights[lIdx].colorIntensity.rgb * uScene.pointLights[lIdx].colorIntensity.w * att;
+    } else if (lType == 3u) {
+        if (int(lIdx) >= clamp(uScene.counts.z, 0, 16)) return false;
+        vec3 toL = uScene.spotLights[lIdx].positionRange.xyz - hitPos;
+        float dist = length(toL);
+        float range = max(uScene.spotLights[lIdx].positionRange.w, 0.001);
+        if (dist >= range) return false;
+        vec3 L = toL / max(dist, 1e-4);
+        if (dot(N, L) <= 0.0) return false;
+        float theta = dot(-L, normalize(uScene.spotLights[lIdx].directionCosOuter.xyz));
+        float cosOut = uScene.spotLights[lIdx].directionCosOuter.w;
+        float spot = clamp((theta - cosOut) / max(mix(cosOut, 1.0, 0.35) - cosOut, 0.001), 0.0, 1.0);
+        if (spot <= 0.0) return false;
+        float att = clamp(1.0 - (dist / range), 0.0, 1.0);
+        att = (att * att) / (1.0 + 0.1 * dist * dist);
+        outL = L;
+        outMaxT = max(dist - 0.01, 0.003);
+        rad = uScene.spotLights[lIdx].colorIntensityCosIn.rgb * uScene.spotLights[lIdx].colorIntensityCosIn.w * att * spot;
+    } else {
+        return false;
+    }
+
+    EvaluateBRDFSplit(N, V, outL, rad, max(albedo, vec3(0.04)), rough, metal, outDiffIrr, outSpecRad);
+    outTargetPdf = Luminance(outDiffIrr * max(albedo, vec3(0.15)) + outSpecRad);
+    return outTargetPdf > 1e-6;
+}
+
+vec3 ClampFirefly(vec3 c, float maxL) {
+    float l = max(c.r, max(c.g, c.b));
+    return (l > maxL) ? c * (maxL / l) : c;
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uPtAccum);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    const uint idx = uint(pix.y) * uint(size.x) + uint(pix.x);
+    const bool doDI = (uGi.restirDIEnabled != 0);
+    const bool doGI = (uGi.restirGIEnabled != 0);
+
+    GpuDIReservoir emptyDI;
+    emptyDI.lightInfo = 0u; emptyDI.M = 0u; emptyDI.weightSum = 0.0; emptyDI.targetPdf = 0.0;
+    emptyDI.lightRandUV = vec2(0.5); emptyDI.pad = vec2(0.0);
+
+    GpuGIReservoir emptyGI;
+    emptyGI.samplePosDist = vec4(0.0);
+    emptyGI.sampleNormType = vec4(0.0);
+    emptyGI.radianceTargetPdf = vec4(0.0);
+    emptyGI.weights = vec4(0.0);
+
+    vec2 currDI = texelFetch(uCurrDepthInst, pix, 0).rg;
+    float currDepth = currDI.x;
+    float currInst  = currDI.y;
+    if (currDepth <= 0.0001 || uGi.hasValidTLAS == 0) {
+        if (doDI) uDiHistOut.reservoirs[idx] = emptyDI;
+        if (doGI) uGiHistOut.reservoirs[idx] = emptyGI;
+        return;
+    }
+
+    vec4 currNR = texelFetch(uCurrNormalRough, pix, 0);
+    vec3 currN = normalize(currNR.xyz);
+    float currRough = clamp(currNR.w, 0.04, 1.0);
+
+    vec4 albMetal = texelFetch(uAlbedoTex, pix, 0);
+    vec3 currAlbedo = max(albMetal.rgb, vec3(0.015));
+    float currMetal = clamp(albMetal.a, 0.0, 1.0);
+
+    vec4 hitDepthInfo = texelFetch(uHitDistDepthTex, pix, 0);
+    float windowZ  = clamp(hitDepthInfo.b, 0.0, 1.0);
+    float refDepth = (hitDepthInfo.a > 0.0001 && !isnan(hitDepthInfo.a) && !isinf(hitDepthInfo.a)) ? hitDepthInfo.a : currDepth;
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    vec3 currPos = ReconstructWorldPos(uv, windowZ);
+    vec3 V = normalize(uScene.cameraPos.xyz - currPos);
+
+    float dRight = texelFetch(uCurrDepthInst, min(pix + ivec2(1, 0), size - ivec2(1)), 0).r;
+    float dUp    = texelFetch(uCurrDepthInst, min(pix + ivec2(0, 1), size - ivec2(1)), 0).r;
+    float gradMag = length(vec2(abs(dRight - currDepth), abs(dUp - currDepth)));
+
+    vec2 motion = texelFetch(uMotionTex, pix, 0).rg;
+    if (any(isnan(motion)) || any(isinf(motion))) motion = vec2(0.0);
+    vec2 prevUv = uv - motion;
+
+    // Locate best-matching temporal pixel in 2x2 previous footprint
+    bool hasTemporal = false;
+    uint bestPrevIdx = 0u;
+    if (uGi.frameIndex > 1u && prevUv.x >= 0.0 && prevUv.x <= 1.0 && prevUv.y >= 0.0 && prevUv.y <= 1.0) {
+        vec2 prevPixF = prevUv * vec2(size) - 0.5;
+        ivec2 baseP = ivec2(floor(prevPixF));
+        vec2 f = fract(prevPixF);
+        float bw[4] = float[4]((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+        ivec2 offs[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
+        float bestScore = -1.0;
+        for (int i = 0; i < 4; ++i) {
+            ivec2 q = baseP + offs[i];
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            vec2 qDI = texelFetch(uPrevDepthInst, q, 0).rg;
+            if (qDI.x <= 0.0001 || abs(currInst - qDI.y) > 0.5) continue;
+            vec3 qN = normalize(texelFetch(uPrevNormalRough, q, 0).xyz);
+            float nDot = dot(currN, qN);
+            if (nDot < 0.88) continue;
+            if (abs(refDepth - qDI.x) > 0.015 * refDepth + 1.5 * gradMag + 0.005) continue;
+            float score = bw[i] * nDot;
+            if (score > bestScore) {
+                bestScore = score;
+                bestPrevIdx = uint(q.y) * uint(size.x) + uint(q.x);
+                hasTemporal = true;
+            }
+        }
+    }
+
+    uint seed = PcgHash(uint(pix.x) * 3343u + uint(pix.y) * 8191u + (uGi.frameIndex & 1023u) * 19937u + 73u);
+    float rotAngle = 2.0 * PI * fract(52.9829189 * fract(dot(vec2(pix), vec2(0.06711056, 0.00583715)) + 0.75487766 * float(uGi.frameIndex & 63u)));
+    const vec2 kSpiral[3] = vec2[3](vec2(1.0, 0.0), vec2(-0.5, 0.8660254), vec2(-0.5, -0.8660254));
+    mat2 rotMat = mat2(cos(rotAngle), -sin(rotAngle), sin(rotAngle), cos(rotAngle));
+
+    vec3 addDiffIrr = vec3(0.0);
+    vec3 addSpecRad = vec3(0.0);
+
+    // =========================================================================
+    // 1. ReSTIR DI: Temporal + Spatial Reservoir Resampling
+    // =========================================================================
+    if (doDI) {
+        GpuDIReservoir currR = uDiCurr.reservoirs[idx];
+        uint tempInfo = currR.lightInfo;
+        vec2 tempUV   = currR.lightRandUV;
+        float tempPHat = currR.targetPdf;
+        uint tempM    = currR.M;
+        float tempWSum = tempPHat * max(currR.weightSum, 0.0) * float(tempM);
+
+        if (hasTemporal) {
+            GpuDIReservoir prevR = uDiPrev.reservoirs[bestPrevIdx];
+            uint prevM = min(prevR.M, 16u);
+            if (prevM > 0u && prevR.weightSum > 0.0 && prevR.lightInfo != 0u) {
+                vec3 candL, dI, sR; float candMaxT, pHatPrev;
+                if (EvaluateLightSample(prevR.lightInfo, prevR.lightRandUV, currPos, currN, V, currAlbedo, currRough, currMetal, candL, candMaxT, dI, sR, pHatPrev)) {
+                    // Validate visibility on temporal sample when camera/scene moves to avoid shadow trails
+                    if (!TraceVisibility(currPos + currN * 0.004, candL, 0.002, candMaxT)) {
+                        pHatPrev = 0.0;
+                    }
+                    float wPrev = pHatPrev * prevR.weightSum * float(prevM);
+                    tempWSum += wPrev;
+                    if (wPrev > 0.0 && Rand01(seed) * tempWSum < wPrev) {
+                        tempInfo = prevR.lightInfo;
+                        tempUV   = prevR.lightRandUV;
+                        tempPHat = pHatPrev;
+                    }
+                }
+                tempM += prevM;
+            }
+        }
+
+        float tempW = (tempPHat > 1e-6 && tempM > 0u) ? min(tempWSum / (tempPHat * float(tempM)), 16.0) : 0.0;
+        GpuDIReservoir histOut;
+        histOut.lightInfo   = tempInfo;
+        histOut.M           = min(tempM, 20u);
+        histOut.weightSum   = tempW;
+        histOut.targetPdf   = tempPHat;
+        histOut.lightRandUV = tempUV;
+        histOut.pad         = vec2(0.0);
+        uDiHistOut.reservoirs[idx] = histOut;
+
+        // Spatial reuse across 3 neighbors (reads uDiCurr -> zero feedback correlation!)
+        uint spatInfo  = tempInfo;
+        vec2 spatUV    = tempUV;
+        float spatPHat = tempPHat;
+        uint spatM     = tempM;
+        float spatWSum = tempPHat * tempW * float(tempM);
+
+        for (int k = 0; k < 3; ++k) {
+            vec2 off = rotMat * kSpiral[k] * (4.0 + 3.0 * float(k));
+            ivec2 q = pix + ivec2(round(off));
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y || q == pix) continue;
+
+            vec2 qDI = texelFetch(uCurrDepthInst, q, 0).rg;
+            if (qDI.x <= 0.0001 || abs(currInst - qDI.y) > 0.5) continue;
+            vec3 qN = normalize(texelFetch(uCurrNormalRough, q, 0).xyz);
+            if (dot(currN, qN) < 0.88 || abs(currDepth - qDI.x) > 0.03 * currDepth) continue;
+
+            GpuDIReservoir qR = uDiCurr.reservoirs[uint(q.y) * uint(size.x) + uint(q.x)];
+            uint qM = min(qR.M, 2u);
+            if (qM > 0u && qR.weightSum > 0.0 && qR.lightInfo != 0u) {
+                vec3 candL, dI, sR; float candMaxT, pHatQ;
+                if (EvaluateLightSample(qR.lightInfo, qR.lightRandUV, currPos, currN, V, currAlbedo, currRough, currMetal, candL, candMaxT, dI, sR, pHatQ)) {
+                    if (!TraceVisibility(currPos + currN * 0.004, candL, 0.002, candMaxT)) {
+                        pHatQ = 0.0;
+                    }
+                    float wQ = pHatQ * qR.weightSum * float(qM);
+                    spatWSum += wQ;
+                    if (wQ > 0.0 && Rand01(seed) * spatWSum < wQ) {
+                        spatInfo = qR.lightInfo;
+                        spatUV   = qR.lightRandUV;
+                        spatPHat = pHatQ;
+                    }
+                }
+                spatM += qM;
+            }
+        }
+
+        float finalDIW = (spatPHat > 1e-6 && spatM > 0u) ? min(spatWSum / (spatPHat * float(spatM)), 16.0) : 0.0;
+        if (finalDIW > 0.0 && spatInfo != 0u) {
+            vec3 winL, winDiff, winSpec; float winMaxT, winPHat;
+            if (EvaluateLightSample(spatInfo, spatUV, currPos, currN, V, currAlbedo, currRough, currMetal, winL, winMaxT, winDiff, winSpec, winPHat)) {
+                addDiffIrr += ClampFirefly(winDiff * finalDIW, 16.0);
+                addSpecRad += ClampFirefly(winSpec * finalDIW, 20.0);
+            }
+        }
+    }
+
+    // =========================================================================
+    // 2. ReSTIR GI: Temporal + Jacobian-Corrected Spatial Indirect Resampling
+    // =========================================================================
+    if (doGI && uGi.giBounces >= 2 && currMetal < 0.99) {
+        GpuGIReservoir currG = uGiCurr.reservoirs[idx];
+        vec4 tempPosDist = currG.samplePosDist;
+        vec4 tempNormType = currG.sampleNormType;
+        vec3 tempRad = currG.radianceTargetPdf.rgb;
+        float tempPHat = currG.radianceTargetPdf.a;
+        float tempM = currG.weights.y;
+        float tempWSum = tempPHat * max(currG.weights.x, 0.0) * tempM;
+
+        if (hasTemporal) {
+            GpuGIReservoir prevG = uGiPrev.reservoirs[bestPrevIdx];
+            float prevM = min(prevG.weights.y, 12.0);
+            float prevType = prevG.sampleNormType.w;
+            if (prevM > 0.5 && prevType > 0.5 && prevG.weights.x > 0.0) {
+                vec3 prevLo = max(prevG.radianceTargetPdf.rgb, vec3(0.0));
+                vec3 candDir = (prevType > 1.5) ? normalize(prevG.samplePosDist.xyz) : normalize(prevG.samplePosDist.xyz - currPos);
+                float candDist = (prevType > 1.5) ? 500.0 : length(prevG.samplePosDist.xyz - currPos);
+                float cosP = max(dot(currN, candDir), 0.0);
+                float pHatPrev = Luminance(prevLo) * cosP;
+                if (pHatPrev > 1e-6 && length(motion * vec2(size)) > 2.0) {
+                    if (!TraceVisibility(currPos + currN * 0.005, candDir, 0.002, max(candDist - 0.015, 0.004))) {
+                        pHatPrev = 0.0;
+                    }
+                }
+                float wPrev = pHatPrev * prevG.weights.x * prevM;
+                tempWSum += wPrev;
+                if (wPrev > 0.0 && Rand01(seed) * tempWSum < wPrev) {
+                    tempPosDist  = prevG.samplePosDist;
+                    tempNormType = prevG.sampleNormType;
+                    tempRad      = prevLo;
+                    tempPHat     = pHatPrev;
+                }
+                tempM += prevM;
+            }
+        }
+
+        float tempGW = (tempPHat > 1e-6 && tempM > 0.5) ? min(tempWSum / (tempPHat * tempM), 16.0) : 0.0;
+        GpuGIReservoir giHistOut;
+        giHistOut.samplePosDist     = tempPosDist;
+        giHistOut.sampleNormType    = tempNormType;
+        giHistOut.radianceTargetPdf = vec4(tempRad, tempPHat);
+        giHistOut.weights           = vec4(tempGW, min(tempM, 16.0), 0.0, 0.0);
+        uGiHistOut.reservoirs[idx]  = giHistOut;
+
+        // Spatial GI reuse with solid-angle Jacobian determinant clamping
+        vec4 spatPosDist  = tempPosDist;
+        vec4 spatNormType = tempNormType;
+        vec3 spatRad      = tempRad;
+        float spatPHat    = tempPHat;
+        float spatM       = tempM;
+        float spatWSum    = tempPHat * tempGW * tempM;
+
+        for (int k = 0; k < 3; ++k) {
+            vec2 off = rotMat * kSpiral[k] * (6.0 + 4.0 * float(k));
+            ivec2 q = pix + ivec2(round(off));
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y || q == pix) continue;
+
+            vec2 qDI = texelFetch(uCurrDepthInst, q, 0).rg;
+            if (qDI.x <= 0.0001 || abs(currInst - qDI.y) > 0.5) continue;
+            vec3 qN = normalize(texelFetch(uCurrNormalRough, q, 0).xyz);
+            if (dot(currN, qN) < 0.85 || abs(currDepth - qDI.x) > 0.04 * currDepth) continue;
+
+            GpuGIReservoir qG = uGiCurr.reservoirs[uint(q.y) * uint(size.x) + uint(q.x)];
+            float qM = min(qG.weights.y, 1.0);
+            float qType = qG.sampleNormType.w;
+            if (qM <= 0.5 || qType <= 0.5) continue;
+
+            float J = 1.0;
+            vec3 candDir;
+            float candDist = 500.0;
+            if (qType > 1.5) {
+                candDir = normalize(qG.samplePosDist.xyz);
+            } else {
+                float qWinZ = clamp(texelFetch(uHitDistDepthTex, q, 0).b, 0.0, 1.0);
+                vec3 qPos = ReconstructWorldPos((vec2(q) + 0.5) / vec2(size), qWinZ);
+                vec3 sPos = qG.samplePosDist.xyz;
+                vec3 sNorm = normalize(qG.sampleNormType.xyz);
+
+                vec3 toP = currPos - sPos;
+                vec3 toQ = qPos - sPos;
+                float dp2 = max(dot(toP, toP), 1e-4);
+                float dq2 = max(dot(toQ, toQ), 1e-4);
+                candDist = sqrt(dp2);
+                candDir = -toP / max(candDist, 1e-4);
+
+                float cosPs = max(dot(sNorm, toP * inversesqrt(dp2)), 0.0);
+                float cosQs = max(dot(sNorm, toQ * inversesqrt(dq2)), 0.0);
+                if (cosPs <= 1e-3 || cosQs <= 1e-3) continue;
+                J = (cosPs * dq2) / max(cosQs * dp2, 1e-4);
+                if (J > 8.0 || J < 0.05) continue;
+                J = clamp(J, 0.1, 4.0);
+            }
+
+            vec3 qLo = max(qG.radianceTargetPdf.rgb, vec3(0.0));
+            float pHatQ = Luminance(qLo) * max(dot(currN, candDir), 0.0);
+            if (pHatQ > 1e-5 && qG.weights.x > 0.0) {
+                if (!TraceVisibility(currPos + currN * 0.005, candDir, 0.002, max(candDist - 0.015, 0.004))) {
+                    pHatQ = 0.0;
+                }
+            }
+
+            float wQ = pHatQ * J * max(qG.weights.x, 0.0) * qM;
+            spatWSum += wQ;
+            if (wQ > 0.0 && Rand01(seed) * spatWSum < wQ) {
+                spatPosDist  = qG.samplePosDist;
+                spatNormType = qG.sampleNormType;
+                spatRad      = qLo;
+                spatPHat     = pHatQ;
+            }
+            spatM += qM;
+        }
+
+        float finalGIW = (spatPHat > 1e-6 && spatM > 0.5) ? min(spatWSum / (spatPHat * spatM), 16.0) : 0.0;
+        if (finalGIW > 0.0 && spatNormType.w > 0.5) {
+            vec3 giDir = (spatNormType.w > 1.5) ? normalize(spatPosDist.xyz) : normalize(spatPosDist.xyz - currPos);
+            float NdotL = max(dot(currN, giDir), 0.0);
+            vec3 F0 = mix(vec3(0.04), currAlbedo, currMetal);
+            vec3 F = FresnelSchlick(max(dot(currN, V), 0.001), F0);
+            vec3 giDiff = ((vec3(1.0) - F) * (1.0 - currMetal) / PI) * spatRad * NdotL * finalGIW * max(uGi.giIntensity, 0.0);
+            addDiffIrr += ClampFirefly(giDiff, 12.0);
+        }
+    }
+
+    if (doDI || doGI) {
+        vec3 baseDiff = max(imageLoad(uPtAccum, pix).rgb, vec3(0.0));
+        vec3 baseSpec = max(imageLoad(uPtSpecAccum, pix).rgb, vec3(0.0));
+        imageStore(uPtAccum, pix, vec4(min(baseDiff + addDiffIrr, vec3(24.0)), 1.0));
+        imageStore(uPtSpecAccum, pix, vec4(min(baseSpec + addSpecRad, vec3(24.0)), 1.0));
+    }
+}

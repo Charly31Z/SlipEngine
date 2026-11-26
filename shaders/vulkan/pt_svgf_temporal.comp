@@ -1,14 +1,21 @@
 #version 460
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) uniform sampler2D uCurrRawIrr;       // m_PtAccum (DiffuseIrradiance demodulated)
-layout(set = 0, binding = 1) uniform sampler2D uCurrNormalRough;  // m_PtNormalRough[curr] (.xyz=normal, .w=roughness)
-layout(set = 0, binding = 2) uniform sampler2D uCurrDepthInst;    // m_PtDepthInst[curr] (.r=linearDepth, .g=instId)
-layout(set = 0, binding = 3) uniform sampler2D uMotionTex;        // m_PtMotion (.rg = currUv - prevUv)
-layout(set = 0, binding = 4) uniform sampler2D uPrevIrrHistory;   // m_PtIrradianceHistory[prev] (.rgb=diffIrr, .a=diffVar)
-layout(set = 0, binding = 5) uniform sampler2D uPrevMoments;      // m_PtMomentsHistory[prev] (.r=mu1, .g=mu2, .b=histLen, .a=specMu1)
-layout(set = 0, binding = 6) uniform sampler2D uPrevNormalRough;  // m_PtNormalRough[prev]
-layout(set = 0, binding = 7) uniform sampler2D uPrevDepthInst;    // m_PtDepthInst[prev]
+#define PT_DESPECKLE_K 2.75
+#define PT_DESPECKLE_EPS 0.03
+
+struct GpuDirLight { vec4 directionIntensity; vec4 colorPad; };
+struct GpuPointLight { vec4 positionRange; vec4 colorIntensity; };
+struct GpuSpotLight { vec4 positionRange; vec4 directionCosOuter; vec4 colorIntensityCosIn; };
+
+layout(set = 0, binding = 0) uniform sampler2D uCurrRawIrr;       // Demodulated DiffuseIrradiance
+layout(set = 0, binding = 1) uniform sampler2D uCurrNormalRough;  // .xyz=normal, .w=roughness
+layout(set = 0, binding = 2) uniform sampler2D uCurrDepthInst;    // .r=linearDepth, .g=instId
+layout(set = 0, binding = 3) uniform sampler2D uMotionTex;        // .rg = currUv - prevUv
+layout(set = 0, binding = 4) uniform sampler2D uPrevIrrHistory;   // .rgb=diffIrr, .a=diffVar
+layout(set = 0, binding = 5) uniform sampler2D uPrevMoments;      // .r=mu1, .g=mu2, .b=histLen, .a=specMu1
+layout(set = 0, binding = 6) uniform sampler2D uPrevNormalRough;
+layout(set = 0, binding = 7) uniform sampler2D uPrevDepthInst;
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D uCurrIrrHistoryOut;
 layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D uCurrMomentsOut;
 layout(set = 0, binding = 10) uniform GiParamsUBO {
@@ -28,10 +35,34 @@ layout(set = 0, binding = 10) uniform GiParamsUBO {
     float svgfSigmaLuminance;
     float svgfSigmaNormal;
     float svgfSigmaDepth;
+    int  restirDIEnabled;
+    int  restirGIEnabled;
+    int  denoiserMode;
+    float specVirtualParallax;
 } uGi;
-layout(set = 0, binding = 11) uniform sampler2D uCurrRawSpec;     // m_PtSpecAccum (SpecularRadiance unmodulated)
-layout(set = 0, binding = 12) uniform sampler2D uPrevSpecHistory; // m_PtSpecularHistory[prev] (.rgb=specRad, .a=specVar)
+layout(set = 0, binding = 11) uniform sampler2D uCurrRawSpec;
+layout(set = 0, binding = 12) uniform sampler2D uPrevSpecHistory;
 layout(set = 0, binding = 13, rgba16f) uniform writeonly image2D uCurrSpecHistoryOut;
+layout(set = 0, binding = 14) uniform sampler2D uHitDistDepth;    // .r=diffHitT, .g=specHitT, .b=windowZ, .a=prevLinearDepth
+layout(set = 0, binding = 15) uniform SceneLightingUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 skyZenith;
+    vec4 skyHorizon;
+    vec4 skyGround;
+    vec4 sunDirIntensity;
+    vec4 sunColorParams;
+    ivec4 counts;
+    GpuDirLight dirLights[4];
+    GpuPointLight pointLights[32];
+    GpuSpotLight spotLights[16];
+    vec4 cloudParams0;
+    vec4 cloudParams1;
+    vec4 cloudParams2;
+    vec4 cloudAmbient;
+    mat4 currViewProj;
+    mat4 prevViewProj;
+} uScene;
 
 float Luminance(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -52,7 +83,6 @@ void main() {
     float currDepth = currDI.x;
     float currInst  = currDI.y;
 
-    // Sky pixel: no geometry history
     if (currDepth <= 0.0001) {
         imageStore(uCurrIrrHistoryOut, pix, vec4(currIrr, 0.0));
         imageStore(uCurrSpecHistoryOut, pix, vec4(currSpec, 0.0));
@@ -64,29 +94,63 @@ void main() {
     vec3 currN = normalize(currNR.xyz);
     float currRough = clamp(currNR.w, 0.04, 1.0);
 
+    // Pre-accumulation salt-and-pepper firefly suppression
+    {
+        float maxNIrr = 0.0;
+        float maxNSpec = 0.0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                ivec2 np = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
+                vec3 ni = max(texelFetch(uCurrRawIrr, np, 0).rgb, vec3(0.0));
+                vec3 ns = max(texelFetch(uCurrRawSpec, np, 0).rgb, vec3(0.0));
+                if (!(any(isnan(ni)) || any(isinf(ni)))) maxNIrr = max(maxNIrr, Luminance(ni));
+                if (!(any(isnan(ns)) || any(isinf(ns)))) maxNSpec = max(maxNSpec, Luminance(ns));
+            }
+        }
+        float limIrr = maxNIrr * PT_DESPECKLE_K + PT_DESPECKLE_EPS;
+        float cl = Luminance(currIrr);
+        if (cl > limIrr) currIrr *= limIrr / cl;
+
+        if (currRough > 0.28) {
+            float limSpec = maxNSpec * PT_DESPECKLE_K + PT_DESPECKLE_EPS;
+            float cs = Luminance(currSpec);
+            if (cs > limSpec) currSpec *= limSpec / cs;
+        }
+    }
+
     float currLuma = Luminance(currIrr);
     vec2 currMom = vec2(currLuma, currLuma * currLuma);
     float currSpecLuma = Luminance(currSpec);
 
-    // Local screen-space depth gradient for grazing-angle disocclusion tolerance
     float dRight = texelFetch(uCurrDepthInst, min(pix + ivec2(1, 0), size - ivec2(1)), 0).r;
     float dUp    = texelFetch(uCurrDepthInst, min(pix + ivec2(0, 1), size - ivec2(1)), 0).r;
-    vec2 depthGrad = vec2(abs(dRight - currDepth), abs(dUp - currDepth));
-    float gradMag = length(depthGrad);
+    float gradMag = length(vec2(abs(dRight - currDepth), abs(dUp - currDepth)));
 
     vec2 uv = (vec2(pix) + 0.5) / vec2(size);
     vec2 motion = texelFetch(uMotionTex, pix, 0).rg;
     if (any(isnan(motion)) || any(isinf(motion))) motion = vec2(0.0);
+
+    vec4 hitDistData = texelFetch(uHitDistDepth, pix, 0);
+    float specHitT   = clamp(hitDistData.g, 0.0, 500.0);
+    float windowZ    = clamp(hitDistData.b, 0.0, 1.0);
+    float refDepth   = (hitDistData.a > 0.0001 && !isnan(hitDistData.a) && !isinf(hitDistData.a)) ? hitDistData.a : currDepth;
+
     vec2 prevUv = uv - motion;
 
+    // Step 1A: Diffuse Temporal Reprojection with strict Depth + Normal + InstanceID disocclusion rejection
     vec3 prevIrrSum = vec3(0.0);
-    vec3 prevSpecSum = vec3(0.0);
-    float prevSpecVarSum = 0.0;
     vec2 prevMomSum = vec2(0.0);
     float prevHistSum = 0.0;
-    float prevSpecMu1Sum = 0.0;
     float wSum = 0.0;
-    float wSpecSum = 0.0;
+
+    // Surface-motion fallback for specular
+    vec3 surfSpecSum = vec3(0.0);
+    float surfSpecVarSum = 0.0;
+    float surfSpecMu1Sum = 0.0;
+    float wSurfSpecSum = 0.0;
+
+    const ivec2 offsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
 
     if (uGi.frameIndex > 1u &&
         prevUv.x >= 0.0 && prevUv.x <= 1.0 &&
@@ -95,14 +159,12 @@ void main() {
         vec2 prevPixF = prevUv * vec2(size) - 0.5;
         ivec2 baseP = ivec2(floor(prevPixF));
         vec2 f = fract(prevPixF);
-
         float bw[4] = float[4](
             (1.0 - f.x) * (1.0 - f.y),
             f.x * (1.0 - f.y),
             (1.0 - f.x) * f.y,
             f.x * f.y
         );
-        ivec2 offsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
 
         for (int i = 0; i < 4; ++i) {
             ivec2 q = baseP + offsets[i];
@@ -113,18 +175,16 @@ void main() {
             float qInst  = qDI.y;
             if (qDepth <= 0.0001) continue;
 
-            // 1. Instance ID consistency check
+            // Strict Instance ID + Normal + Expected Planar Depth check
             if (abs(currInst - qInst) > 0.5) continue;
 
-            // 2. Normal consistency check
             vec4 qNR = texelFetch(uPrevNormalRough, q, 0);
             vec3 qN = normalize(qNR.xyz);
             float nDot = dot(currN, qN);
             if (nDot < 0.90) continue;
 
-            // 3. Linear depth consistency check
-            float depthTol = max(0.07 * currDepth, 2.2 * gradMag + 0.015);
-            if (abs(currDepth - qDepth) > depthTol) continue;
+            float depthTol = 0.012 * refDepth + 1.5 * gradMag + 0.004;
+            if (abs(refDepth - qDepth) > depthTol) continue;
 
             vec4 qHist = texelFetch(uPrevIrrHistory, q, 0);
             vec4 qMom  = texelFetch(uPrevMoments, q, 0);
@@ -136,17 +196,73 @@ void main() {
             prevHistSum += qMom.z * w;
             wSum += w;
 
-            // Specular consistency check (stricter normal + roughness compatibility)
             float qRough = clamp(qNR.w, 0.04, 1.0);
             float minSpecNormalDot = mix(0.985, 0.92, smoothstep(0.05, 0.45, currRough));
-            if (nDot >= minSpecNormalDot && abs(currRough - qRough) < 0.15) {
+            if (nDot >= minSpecNormalDot && abs(currRough - qRough) < 0.14) {
                 vec4 qSpecHist = texelFetch(uPrevSpecHistory, q, 0);
                 if (!any(isnan(qSpecHist)) && !any(isinf(qSpecHist))) {
-                    prevSpecSum    += max(qSpecHist.rgb, vec3(0.0)) * w;
-                    prevSpecVarSum += max(qSpecHist.a, 0.0) * w;
-                    prevSpecMu1Sum += max(qMom.w, 0.0) * w;
-                    wSpecSum += w;
+                    surfSpecSum    += max(qSpecHist.rgb, vec3(0.0)) * w;
+                    surfSpecVarSum += max(qSpecHist.a, 0.0) * w;
+                    surfSpecMu1Sum += max(qMom.w, 0.0) * w;
+                    wSurfSpecSum   += w;
                 }
+            }
+        }
+    }
+
+    // Step 1B: Virtual Reflected Position Reprojection for Smooth/Glossy Specular (eliminates reflection parallax lag!)
+    vec3 virtSpecSum = vec3(0.0);
+    float virtSpecVarSum = 0.0;
+    float virtSpecMu1Sum = 0.0;
+    float wVirtSpecSum = 0.0;
+    float parallaxFactor = (1.0 - smoothstep(0.04, 0.32, currRough)) * clamp(uGi.specVirtualParallax, 0.0, 1.0);
+
+    if (uGi.frameIndex > 1u && parallaxFactor > 0.02 && specHitT > 0.005) {
+        vec4 worldPos4 = uScene.invViewProj * vec4(uv * 2.0 - 1.0, windowZ, 1.0);
+        vec3 hitPos = worldPos4.xyz / max(abs(worldPos4.w), 1e-6);
+        vec3 viewRay = hitPos - uScene.cameraPos.xyz;
+        float viewDist = length(viewRay);
+        vec3 viewDir = viewRay / max(viewDist, 1e-5);
+
+        // Virtual reflected world position behind the planar/low-curvature reflector
+        vec3 virtualPos = hitPos + viewDir * specHitT;
+        vec4 virtPrevClip = uScene.prevViewProj * vec4(virtualPos, 1.0);
+        vec2 virtPrevUv = (virtPrevClip.xy / max(abs(virtPrevClip.w), 1e-6)) * 0.5 + 0.5;
+
+        if (virtPrevUv.x >= 0.0 && virtPrevUv.x <= 1.0 && virtPrevUv.y >= 0.0 && virtPrevUv.y <= 1.0) {
+            vec2 vPixF = virtPrevUv * vec2(size) - 0.5;
+            ivec2 vBaseP = ivec2(floor(vPixF));
+            vec2 vf = fract(vPixF);
+            float vbw[4] = float[4](
+                (1.0 - vf.x) * (1.0 - vf.y),
+                vf.x * (1.0 - vf.y),
+                (1.0 - vf.x) * vf.y,
+                vf.x * vf.y
+            );
+
+            for (int i = 0; i < 4; ++i) {
+                ivec2 q = vBaseP + offsets[i];
+                if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+
+                vec2 qDI = texelFetch(uPrevDepthInst, q, 0).rg;
+                if (qDI.x <= 0.0001 || abs(currInst - qDI.y) > 0.5) continue;
+
+                vec4 qNR = texelFetch(uPrevNormalRough, q, 0);
+                vec3 qN = normalize(qNR.xyz);
+                float qRough = clamp(qNR.w, 0.04, 1.0);
+
+                // Only accept virtual reprojection when the reflector is locally flat (nDot >= 0.992) so curved spheres keep surface motion
+                if (dot(currN, qN) < 0.992 || abs(currRough - qRough) > 0.08) continue;
+
+                vec4 qSpecHist = texelFetch(uPrevSpecHistory, q, 0);
+                vec4 qMom      = texelFetch(uPrevMoments, q, 0);
+                if (qMom.z < 0.5 || any(isnan(qSpecHist)) || any(isinf(qSpecHist))) continue;
+
+                float vw = vbw[i];
+                virtSpecSum    += max(qSpecHist.rgb, vec3(0.0)) * vw;
+                virtSpecVarSum += max(qSpecHist.a, 0.0) * vw;
+                virtSpecMu1Sum += max(qMom.w, 0.0) * vw;
+                wVirtSpecSum   += vw;
             }
         }
     }
@@ -158,45 +274,38 @@ void main() {
     if (wSum > 0.01) {
         vec3 histIrr = prevIrrSum / wSum;
         vec2 histMom = prevMomSum / wSum;
-        float histLen = min((prevHistSum / wSum) + 1.0, 32.0);
 
-        // 3x3 neighborhood clamping for diffuse irradiance
-        vec3 m1 = vec3(0.0);
-        vec3 m2 = vec3(0.0);
-        float nCnt = 0.0;
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                ivec2 np = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
-                vec3 c = max(texelFetch(uCurrRawIrr, np, 0).rgb, vec3(0.0));
-                if (any(isnan(c)) || any(isinf(c))) continue;
-                m1 += c;
-                m2 += c * c;
-                nCnt += 1.0;
-            }
-        }
-        m1 /= max(nCnt, 1.0);
-        vec3 sigma = sqrt(max(m2 / max(nCnt, 1.0) - m1 * m1, vec3(0.0)));
-        histIrr = clamp(histIrr, max(m1 - sigma * 3.5, vec3(0.0)), m1 + sigma * 3.5 + vec3(0.20));
+        // Disocclusion confidence: partial bilinear footprint (< 0.95) shortens history and increases reactive alpha
+        float disoccConf = smoothstep(0.05, 0.95, wSum);
+        float histLen = min(1.0 + (prevHistSum / wSum) * disoccConf, 32.0);
 
-        float minAlpha = clamp(uGi.giTemporalAlpha, 0.04, 0.50);
-        float alphaIrr = max(minAlpha, 1.0 / histLen);
-        float alphaMom = max(0.20, 1.0 / histLen);
+        // Soft temporal variance-guided anti-ghosting when established history (histLen > 6) sees abrupt lighting change
+        float prevVar = max(0.0, histMom.y - histMom.x * histMom.x);
+        float lumaDelta = abs(currLuma - histMom.x) / max(sqrt(prevVar) + 0.25 * max(histMom.x, currLuma) + 0.08, 1e-3);
+        float fastReact = smoothstep(2.5, 6.0, lumaDelta) * smoothstep(6.5, 12.0, histLen) * 0.45;
+
+        float baseAlpha = clamp(uGi.giTemporalAlpha, 0.04, 0.50);
+        float disoccBoost = (1.0 - disoccConf) * 0.55;
+        float alphaIrr = clamp(max(baseAlpha + disoccBoost + fastReact, 1.0 / max(histLen, 1.0)), 0.04, 1.0);
 
         outIrr     = mix(histIrr, currIrr, alphaIrr);
-        outMoments = mix(histMom, currMom, alphaMom);
-        outHistLen = histLen;
+        outMoments = mix(histMom, currMom, alphaIrr);
+        outHistLen = mix(histLen, 2.0, fastReact);
     }
 
     vec3 outSpec = currSpec;
     float outSpecMu1 = currSpecLuma;
     float outSpecVar = currSpecLuma * currSpecLuma * 0.25;
 
-    if (wSpecSum > 0.01) {
-        vec3 histSpec = prevSpecSum / wSpecSum;
-        float histSpecVar = prevSpecVarSum / wSpecSum;
-        float histSpecMu1 = prevSpecMu1Sum / wSpecSum;
+    bool useVirtualSpec = (wVirtSpecSum > 0.25);
+    float wSpecSum = useVirtualSpec ? wVirtSpecSum : wSurfSpecSum;
 
-        // 3x3 neighborhood clamping for specular radiance (wider tolerance on glossy/rough, tight responsive alpha on mirror)
+    if (wSpecSum > 0.01) {
+        vec3 histSpec     = (useVirtualSpec ? virtSpecSum    : surfSpecSum)    / wSpecSum;
+        float histSpecVar = (useVirtualSpec ? virtSpecVarSum : surfSpecVarSum) / wSpecSum;
+        float histSpecMu1 = (useVirtualSpec ? virtSpecMu1Sum : surfSpecMu1Sum) / wSpecSum;
+
+        // 3x3 neighborhood clamping for specular radiance
         vec3 sm1 = vec3(0.0);
         vec3 sm2 = vec3(0.0);
         float sCnt = 0.0;
@@ -212,22 +321,22 @@ void main() {
         }
         sm1 /= max(sCnt, 1.0);
         vec3 sSigma = sqrt(max(sm2 / max(sCnt, 1.0) - sm1 * sm1, vec3(0.0)));
-        float clampK = mix(2.2, 3.8, smoothstep(0.08, 0.45, currRough));
-        histSpec = clamp(histSpec, max(sm1 - sSigma * clampK, vec3(0.0)), sm1 + sSigma * clampK + vec3(0.25));
+        float clampK = mix(2.0, 3.6, smoothstep(0.06, 0.45, currRough));
+        histSpec = clamp(histSpec, max(sm1 - sSigma * clampK, vec3(0.0)), sm1 + sSigma * clampK + vec3(0.20));
 
-        // Mirror surfaces (low roughness) use responsive temporal blend under camera motion to avoid parallax ghosting
+        float specDisoccConf = smoothstep(0.05, 0.95, wSpecSum);
         float motionLen = length(motion * vec2(size));
+        // When virtual position reprojection succeeded on a flat mirror, no motion boost needed -> keeps mirror ultra-clean!
+        float mirrorBoost = useVirtualSpec ? 0.0 : ((1.0 - smoothstep(0.04, 0.22, currRough)) * clamp(motionLen * 0.16, 0.0, 0.50));
         float baseSpecAlpha = clamp(uGi.giTemporalAlpha, 0.04, 0.50);
-        float mirrorBoost = (1.0 - smoothstep(0.04, 0.22, currRough)) * clamp(motionLen * 0.15, 0.0, 0.45);
-        float alphaSpec = clamp(max(baseSpecAlpha + mirrorBoost, 1.0 / max(outHistLen, 1.0)), 0.05, 0.65);
+        float alphaSpec = clamp(max(baseSpecAlpha + mirrorBoost + (1.0 - specDisoccConf) * 0.55, 1.0 / max(outHistLen, 1.0)), 0.05, 0.85);
 
         outSpec    = mix(histSpec, currSpec, alphaSpec);
-        outSpecMu1 = mix(histSpecMu1, currSpecLuma, max(0.20, alphaSpec));
+        outSpecMu1 = mix(histSpecMu1, currSpecLuma, alphaSpec);
         float specDiff = currSpecLuma - outSpecMu1;
-        outSpecVar = max(0.0, mix(histSpecVar, specDiff * specDiff, max(0.20, alphaSpec)));
+        outSpecVar = max(0.0, mix(histSpecVar, specDiff * specDiff, alphaSpec));
     }
 
-    // Temporal variance estimate for diffuse: Var(L) = E[L^2] - E[L]^2
     float temporalVariance = max(0.0, outMoments.y - outMoments.x * outMoments.x);
 
     imageStore(uCurrIrrHistoryOut, pix, vec4(outIrr, temporalVariance));

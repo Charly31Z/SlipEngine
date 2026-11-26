@@ -1,4 +1,5 @@
 #include "SlipEngine/render/vulkan/VulkanContext.h"
+#include "SlipEngine/render/vulkan/VulkanStreamline.h"
 
 #include <SDL2/SDL.h>
 #define NO_SDL_VULKAN_TYPEDEFS
@@ -206,6 +207,8 @@ bool VulkanContext::CreateInstance(SDL_Window* window) {
     std::vector<VkExtensionProperties> availExts(availExtCount);
     vkEnumerateInstanceExtensionProperties(nullptr, &availExtCount, availExts.data());
 
+    VulkanStreamline::AppendRecommendedInstanceExtensions(availExts, extensions);
+
     uint32_t availLayerCount = 0;
     vkEnumerateInstanceLayerProperties(&availLayerCount, nullptr);
     std::vector<VkLayerProperties> availLayers(availLayerCount);
@@ -410,6 +413,7 @@ bool VulkanContext::CreateLogicalDevice() {
         if (m_Capabilities.supportsRayQuery) {
             deviceExts.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
         }
+        VulkanStreamline::AppendRecommendedDeviceExtensions(availExts, deviceExts);
     }
 
     float queuePriority = 1.0f;

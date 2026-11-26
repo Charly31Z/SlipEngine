@@ -37,6 +37,10 @@ void SlipGraphicsSettings::ResetToDefaults() {
     m_Data.svgfSigmaLuminance = 2.0f;
     m_Data.svgfSigmaNormal = 128.0f;
     m_Data.svgfSigmaDepth = 1.5f;
+    m_Data.restirDIEnabled = true;
+    m_Data.restirGIEnabled = true;
+    m_Data.specVirtualParallax = 1.0f;
+    m_Data.dlssQualityMode = 1;
     m_Data.ssrEnabled = true;
     m_Data.ssrQuality = 2;
     m_Data.ssrRoughnessCutoff = 0.75f;
@@ -135,7 +139,11 @@ bool SlipGraphicsSettings::LoadFromFile(const std::string& filePath) {
         } else if (key == "PTMode") {
             std::string lowerVal = val;
             std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
-            if (lowerVal == "realtimesvgf" || lowerVal == "svgf" || lowerVal == "realtime" || lowerVal == "1") {
+            if (lowerVal == "realtimedlssrr" || lowerVal == "dlssrr" || lowerVal == "dlss" || lowerVal == "3") {
+                m_Data.ptMode = PathTracingMode::RealtimeDLSSRR;
+            } else if (lowerVal == "realtimenrd" || lowerVal == "nrd" || lowerVal == "reblur" || lowerVal == "2") {
+                m_Data.ptMode = PathTracingMode::RealtimeNRD;
+            } else if (lowerVal == "realtimesvgf" || lowerVal == "svgf" || lowerVal == "realtime" || lowerVal == "1") {
                 m_Data.ptMode = PathTracingMode::RealtimeSVGF;
             } else {
                 m_Data.ptMode = PathTracingMode::Progressive;
@@ -166,6 +174,18 @@ bool SlipGraphicsSettings::LoadFromFile(const std::string& filePath) {
             try { m_Data.svgfSigmaNormal = std::clamp(std::stof(val), 8.0f, 512.0f); } catch (...) {}
         } else if (key == "SVGFSigmaDepth") {
             try { m_Data.svgfSigmaDepth = std::clamp(std::stof(val), 0.1f, 8.0f); } catch (...) {}
+        } else if (key == "ReSTIRDI") {
+            std::string lowerVal = val;
+            std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
+            m_Data.restirDIEnabled = (lowerVal == "true" || lowerVal == "1" || lowerVal == "yes");
+        } else if (key == "ReSTIRGI") {
+            std::string lowerVal = val;
+            std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
+            m_Data.restirGIEnabled = (lowerVal == "true" || lowerVal == "1" || lowerVal == "yes");
+        } else if (key == "SpecVirtualParallax") {
+            try { m_Data.specVirtualParallax = std::clamp(std::stof(val), 0.0f, 1.0f); } catch (...) {}
+        } else if (key == "DLSSQualityMode") {
+            try { m_Data.dlssQualityMode = std::clamp(std::stoi(val), 0, 3); } catch (...) {}
         } else if (key == "SSREnabled") {
             std::string lowerVal = val;
             std::transform(lowerVal.begin(), lowerVal.end(), lowerVal.begin(), ::tolower);
@@ -266,7 +286,11 @@ bool SlipGraphicsSettings::SaveToFile(const std::string& filePath) {
     ss << "PCFQuality=" << m_Data.pcfQuality << "\n";
     ss << "CascadeLambda=" << m_Data.cascadeLambda << "\n";
     ss << "GIMode=" << (m_Data.giMode == GlobalIlluminationMode::Off ? "Off" : (m_Data.giMode == GlobalIlluminationMode::PathTracing ? "PathTracing" : "RTGI")) << "\n";
-    ss << "PTMode=" << (m_Data.ptMode == PathTracingMode::RealtimeSVGF ? "RealtimeSVGF" : "Progressive") << "\n";
+    const char* ptModeStr = "Progressive";
+    if (m_Data.ptMode == PathTracingMode::RealtimeSVGF) ptModeStr = "RealtimeSVGF";
+    else if (m_Data.ptMode == PathTracingMode::RealtimeNRD) ptModeStr = "RealtimeNRD";
+    else if (m_Data.ptMode == PathTracingMode::RealtimeDLSSRR) ptModeStr = "RealtimeDLSSRR";
+    ss << "PTMode=" << ptModeStr << "\n";
     ss << "GIBounces=" << m_Data.giBounces << "\n";
     ss << "GIRaysPerPixel=" << m_Data.giRaysPerPixel << "\n";
     ss << "GIIntensity=" << m_Data.giIntensity << "\n";
@@ -278,6 +302,10 @@ bool SlipGraphicsSettings::SaveToFile(const std::string& filePath) {
     ss << "SVGFSigmaLuminance=" << m_Data.svgfSigmaLuminance << "\n";
     ss << "SVGFSigmaNormal=" << m_Data.svgfSigmaNormal << "\n";
     ss << "SVGFSigmaDepth=" << m_Data.svgfSigmaDepth << "\n";
+    ss << "ReSTIRDI=" << (m_Data.restirDIEnabled ? "true" : "false") << "\n";
+    ss << "ReSTIRGI=" << (m_Data.restirGIEnabled ? "true" : "false") << "\n";
+    ss << "SpecVirtualParallax=" << m_Data.specVirtualParallax << "\n";
+    ss << "DLSSQualityMode=" << m_Data.dlssQualityMode << "\n";
     ss << "SSREnabled=" << (m_Data.ssrEnabled ? "true" : "false") << "\n";
     ss << "SSRQuality=" << m_Data.ssrQuality << "\n";
     ss << "SSRRoughnessCutoff=" << m_Data.ssrRoughnessCutoff << "\n";

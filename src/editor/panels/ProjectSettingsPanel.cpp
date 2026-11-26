@@ -9,6 +9,7 @@
 #include "SlipEngine/render/rhi/SlipRHI.h"
 #if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
     #include "SlipEngine/render/vulkan/VulkanRHI.h"
+    #include "SlipEngine/render/vulkan/VulkanStreamline.h"
 #endif
 #include "SlipEngine/scene/SlipComponent.h"
 #include "SlipEngine/scene/SlipEntity.h"
@@ -341,14 +342,16 @@ void ProjectSettingsPanel::RenderGraphicsCategory() {
 
         if (data.giMode == GlobalIlluminationMode::PathTracing) {
             const char* ptModes[] = {
-                "Path Tracing Progresivo",
-                "Path Tracing Tiempo Real (SVGF)"
+                "Progresivo (Referencia sin sesgo)",
+                "Tiempo Real - SVGF Mejorado (Paso 1)",
+                "Tiempo Real - NRD ReBLUR Hit-Distance (Paso 2)",
+                "Tiempo Real - DLSS + Ray Reconstruction (Paso 4)"
             };
-            int ptModeIdx = static_cast<int>(data.ptMode);
-            if (ImGui::Combo("Modo de Path Tracing", &ptModeIdx, ptModes, 2)) {
+            int ptModeIdx = std::clamp(static_cast<int>(data.ptMode), 0, 3);
+            if (ImGui::Combo("Modo de Path Tracing", &ptModeIdx, ptModes, 4)) {
                 data.ptMode = static_cast<PathTracingMode>(ptModeIdx);
-                if (data.ptMode == PathTracingMode::RealtimeSVGF && data.giRaysPerPixel > 2) {
-                    data.giRaysPerPixel = 2;
+                if (data.ptMode != PathTracingMode::Progressive && data.giRaysPerPixel > 2) {
+                    data.giRaysPerPixel = 1;
                 }
 #if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
                 if (auto* vkRhi = dynamic_cast<VulkanRHI*>(rhi)) {
@@ -366,7 +369,7 @@ void ProjectSettingsPanel::RenderGraphicsCategory() {
                 ImGui::TextDisabled("RTGI en tiempo real usa hasta 4 rebotes. Path Tracing llega a 8.");
             }
             const bool isRealtimePt = (data.giMode == GlobalIlluminationMode::PathTracing &&
-                                       data.ptMode == PathTracingMode::RealtimeSVGF);
+                                       data.ptMode != PathTracingMode::Progressive);
             const int maxSpp = isRealtimePt ? 2 : 4;
             if (data.giRaysPerPixel > maxSpp) {
                 data.giRaysPerPixel = maxSpp;
@@ -383,16 +386,38 @@ void ProjectSettingsPanel::RenderGraphicsCategory() {
                     ImGui::SliderFloat("Alfa Temporal", &data.giTemporalAlpha, 0.02f, 0.50f, "%.2f");
                 }
             } else if (data.giMode == GlobalIlluminationMode::PathTracing) {
-                if (data.ptMode == PathTracingMode::RealtimeSVGF) {
+                if (isRealtimePt) {
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.45f, 0.90f, 1.0f, 1.0f), "ReSTIR Muestreo de Importancia Espacio-Temporal (Paso 3)");
+                    ImGui::Checkbox("ReSTIR DI (Luces Directas RIS + Reutilización)", &data.restirDIEnabled);
+                    ImGui::Checkbox("ReSTIR GI (Iluminación Indirecta con Jacobiano)", &data.restirGIEnabled);
+
                     if (data.giDenoiserEnabled) {
-                        ImGui::SliderFloat("Alfa Temporal (SVGF)", &data.giTemporalAlpha, 0.02f, 0.50f, "%.2f");
-                        ImGui::SliderInt("Iteraciones À-Trous (SVGF)", &data.svgfAtrousIterations, 1, 5);
-                        ImGui::SliderFloat("Sigma Luminancia (SVGF)", &data.svgfSigmaLuminance, 0.50f, 5.00f, "%.2f");
-                        ImGui::SliderFloat("Sigma Normal (SVGF)", &data.svgfSigmaNormal, 16.0f, 256.0f, "%.1f");
-                        ImGui::SliderFloat("Sigma Profundidad (SVGF)", &data.svgfSigmaDepth, 0.25f, 4.00f, "%.2f");
+                        ImGui::Separator();
+                        ImGui::SliderFloat("Alfa Temporal", &data.giTemporalAlpha, 0.02f, 0.50f, "%.2f");
+                        ImGui::SliderFloat("Paralaje Virtual Especular", &data.specVirtualParallax, 0.0f, 1.0f, "%.2f");
+                        if (data.ptMode == PathTracingMode::RealtimeSVGF) {
+                            ImGui::SliderInt("Iteraciones À-Trous (SVGF)", &data.svgfAtrousIterations, 1, 5);
+                        }
+                        ImGui::SliderFloat("Sigma Luminancia", &data.svgfSigmaLuminance, 0.50f, 5.00f, "%.2f");
+                        ImGui::SliderFloat("Sigma Normal", &data.svgfSigmaNormal, 16.0f, 256.0f, "%.1f");
+                        ImGui::SliderFloat("Sigma Profundidad / Plano", &data.svgfSigmaDepth, 0.25f, 4.00f, "%.2f");
                     }
-                    ImGui::TextColored(ImVec4(0.45f, 0.90f, 1.0f, 1.0f),
-                                       "SVGF Dual: Difuso Demodulado + Especular por Roughness (1-2 SPP)");
+
+                    if (data.ptMode == PathTracingMode::RealtimeDLSSRR) {
+                        ImGui::Separator();
+                        const char* dlssQualities[] = { "DLAA (Resolución Nativa)", "Calidad (Quality)", "Equilibrado (Balanced)", "Rendimiento (Performance)" };
+                        ImGui::Combo("Calidad DLSS Ray Reconstruction", &data.dlssQualityMode, dlssQualities, 4);
+#if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)
+                        ImGui::TextWrapped("%s", VulkanStreamline::Get().GetStatusMessage().c_str());
+#endif
+                    } else if (data.ptMode == PathTracingMode::RealtimeNRD) {
+                        ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.65f, 1.0f),
+                                           "NRD ReBLUR: Hit-Distance + Fast-History Anti-Lag + Disco Poisson 3D");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.45f, 0.90f, 1.0f, 1.0f),
+                                           "SVGF Mejorado: Posición Virtual Especular + Anti-Boiling + Blue Noise");
+                    }
                 } else {
                     ImGui::SliderInt("Muestras Máximas (0 = Ilimitado)", &data.ptMaxSamples, 0, 1024);
 #if defined(SLIP_ENABLE_VULKAN) && !defined(SLIP_PLATFORM_ANDROID) && !defined(__ANDROID__)

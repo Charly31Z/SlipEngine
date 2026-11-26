@@ -1,5 +1,6 @@
 #include "SlipEngine/render/vulkan/VulkanSceneRenderer.h"
 #include "SlipEngine/render/vulkan/VulkanContext.h"
+#include "SlipEngine/render/vulkan/VulkanStreamline.h"
 #include "SlipEngine/render/vulkan/SlipSpirvCompiler.h"
 #include "SlipEngine/render/SlipGraphicsSettings.h"
 #include "SlipEngine/render/SlipPostProcess.h"
@@ -617,6 +618,8 @@ bool VulkanSceneRenderer::Initialize(VulkanContext* context) {
         return false;
     }
 
+    VulkanStreamline::Get().Initialize(m_Context);
+
     if (!CreatePerFrameResources()) {
         Shutdown();
         return false;
@@ -669,6 +672,7 @@ void VulkanSceneRenderer::Shutdown() {
         }
 
         DestroyRenderTargets();
+        VulkanStreamline::Get().Shutdown();
         m_RtGI.Shutdown(m_Context);
         m_ASManager.Shutdown(m_Context);
 
@@ -1182,7 +1186,9 @@ void main() {
     VkPipelineMultisampleStateCreateInfo msaa{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
     msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineDepthStencilStateCreateInfo depth{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
-    depth.depthTestEnable = VK_FALSE;
+    // Vulkan descarta depthWriteEnable si depthTestEnable es false, y las particulas
+    // quedaban siempre delante. ALWAYS hace que cada pixel reemplace el depth.
+    depth.depthTestEnable = VK_TRUE;
     depth.depthWriteEnable = VK_TRUE;
     depth.depthCompareOp = VK_COMPARE_OP_ALWAYS;
     std::array<VkDynamicState, 2> dynStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
@@ -1216,7 +1222,7 @@ void main() {
 }
 
 bool VulkanSceneRenderer::ResolvePathTracingDepth(VkCommandBuffer cmd, uint32_t slot, uint32_t width, uint32_t height) {
-    const VulkanTexture& src = m_RtGI.GetPtDepthInst(m_RtGI.GetPtCurrPingPongIndex());
+    const VulkanTexture& src = m_RtGI.GetPtHitDistAndDepth();
     if (!src.IsValid() || m_PtDepthPipeline == VK_NULL_HANDLE || slot >= kFrameSlots) return false;
 
     VkImageMemoryBarrier depthBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
@@ -2056,7 +2062,14 @@ bool VulkanSceneRenderer::RenderScene(
         post.ssaoBias,
         glm::clamp(post.ssaoIntensity, 0.0f, 2.0f)
     );
-    lightUbo.aoParams2 = glm::vec4(post.ssaoPower, 0.0f, 0.0f, 0.0f);
+    glm::vec2 camJitterPixels(0.0f);
+    if (gfx.giMode == GlobalIlluminationMode::PathTracing &&
+        gfx.ptMode == PathTracingMode::RealtimeDLSSRR &&
+        VulkanStreamline::Get().IsRayReconstructionAvailable())
+    {
+        camJitterPixels = VulkanStreamline::ComputeHaltonJitterPixels(frameIndex, 16u);
+    }
+    lightUbo.aoParams2 = glm::vec4(post.ssaoPower, 0.0f, camJitterPixels.x, camJitterPixels.y);
     m_LightingUBOs[slot].Upload(m_Context, &lightUbo, sizeof(lightUbo), 0);
 
     UpdateComputeDescriptors(slot, targetView, targetGeneration);

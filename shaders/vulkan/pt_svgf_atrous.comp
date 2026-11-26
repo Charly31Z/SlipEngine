@@ -5,7 +5,7 @@ layout(set = 0, binding = 0) uniform sampler2D uIrrVarIn;         // .rgb = demo
 layout(set = 0, binding = 1) uniform sampler2D uMomentsIn;        // .r = mu1, .g = mu2, .b = historyLength, .a = specMu1
 layout(set = 0, binding = 2) uniform sampler2D uNormalRoughIn;    // .xyz = worldNormal, .w = roughness
 layout(set = 0, binding = 3) uniform sampler2D uDepthInstIn;      // .r = linearDepth, .g = instanceID
-layout(set = 0, binding = 4) uniform sampler2D uAlbedoIn;         // .rgb = original primary Albedo, .a = metallic
+layout(set = 0, binding = 4) uniform sampler2D uAlbedoIn;         // .rgb = original primary Albedo (ONLY used if isLastPass!=0, NEVER in filter!)
 layout(set = 0, binding = 5) uniform sampler2D uEmissiveIn;       // .rgb = primaryEmissive
 layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D uIrrVarOut;
 layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D uHdrOut;
@@ -26,6 +26,10 @@ layout(set = 0, binding = 8) uniform GiParamsUBO {
     float svgfSigmaLuminance;
     float svgfSigmaNormal;
     float svgfSigmaDepth;
+    int  restirDIEnabled;
+    int  restirGIEnabled;
+    int  denoiserMode;
+    float specVirtualParallax;
 } uGi;
 layout(set = 0, binding = 9)  uniform sampler2D uSpecVarIn;       // .rgb = SpecularRadiance (unmodulated), .a = specular variance
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D uSpecVarOut;
@@ -54,20 +58,16 @@ void main() {
     vec3 centerSpec = max(centerSpecVar.rgb, vec3(0.0));
     float centerSVar = max(centerSpecVar.a, 0.0);
 
-    vec3 primaryAlbedo = max(texelFetch(uAlbedoIn, pix, 0).rgb, vec3(0.0));
-    vec3 primaryEmissive = max(texelFetch(uEmissiveIn, pix, 0).rgb, vec3(0.0));
-    if (any(isnan(primaryAlbedo)) || any(isinf(primaryAlbedo))) primaryAlbedo = vec3(1.0);
-    if (any(isnan(primaryEmissive)) || any(isinf(primaryEmissive))) primaryEmissive = vec3(0.0);
-
     vec2 centerDI = texelFetch(uDepthInstIn, pix, 0).rg;
     float centerDepth = centerDI.x;
     float centerInst  = centerDI.y;
 
-    // Sky pixel or denoiser disabled
     if (centerDepth <= 0.0001 || uGi.giDenoiserEnabled == 0 || pc.stepSize <= 0) {
         imageStore(uIrrVarOut, pix, vec4(centerIrr, centerVar));
         imageStore(uSpecVarOut, pix, vec4(centerSpec, centerSVar));
         if (pc.isLastPass != 0) {
+            vec3 primaryAlbedo = max(texelFetch(uAlbedoIn, pix, 0).rgb, vec3(0.0));
+            vec3 primaryEmissive = max(texelFetch(uEmissiveIn, pix, 0).rgb, vec3(0.0));
             imageStore(uHdrOut, pix, vec4(centerIrr * primaryAlbedo + centerSpec + primaryEmissive, 1.0));
         }
         return;
@@ -80,12 +80,10 @@ void main() {
     float centerSpecLuma = Luminance(centerSpec);
     float histLen = texelFetch(uMomentsIn, pix, 0).z;
 
-    // Live UI SVGF calibration parameters (strict shadow & contact preservation defaults)
     float userSigmaL = clamp(uGi.svgfSigmaLuminance, 0.25, 8.0);
     float userSigmaN = clamp(uGi.svgfSigmaNormal, 16.0, 512.0);
     float userSigmaZ = clamp(uGi.svgfSigmaDepth, 0.10, 8.0);
 
-    // Symmetric screen-space depth gradient (finite derivative along X and Y) to strictly penalize depth jumps
     float dRight = texelFetch(uDepthInstIn, min(pix + ivec2(1, 0), size - ivec2(1)), 0).r;
     float dLeft  = texelFetch(uDepthInstIn, max(pix - ivec2(1, 0), ivec2(0)), 0).r;
     float dUp    = texelFetch(uDepthInstIn, min(pix + ivec2(0, 1), size - ivec2(1)), 0).r;
@@ -95,12 +93,12 @@ void main() {
         min(abs(dUp - centerDepth), abs(centerDepth - dDown))
     );
 
-    // 3x3 Spatial Variance Estimation for short history (historyLength < 4) on first pass
+    // 5x5 Spatial Variance Estimation when historyLength < 4 (eliminates unstable early variance)
     if (pc.stepSize == 1 && histLen < 4.0) {
         vec2 sumMom = vec2(0.0);
         float wMomSum = 0.0;
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -2; dy <= 2; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
                 ivec2 q = clamp(pix + ivec2(dx, dy), ivec2(0), size - ivec2(1));
                 vec2 qDI = texelFetch(uDepthInstIn, q, 0).rg;
                 if (qDI.x <= 0.0001 || abs(centerInst - qDI.y) > 0.5) continue;
@@ -110,8 +108,7 @@ void main() {
                 float wZ = exp(-abs(centerDepth - qDI.x) / max(userSigmaZ * expDz + 0.005 * centerDepth, 1e-4));
                 float w = wN * wZ;
                 if (w > 1e-4) {
-                    vec2 qM = texelFetch(uMomentsIn, q, 0).xy;
-                    sumMom += qM * w;
+                    sumMom += texelFetch(uMomentsIn, q, 0).xy * w;
                     wMomSum += w;
                 }
             }
@@ -123,7 +120,7 @@ void main() {
         }
     }
 
-    // 3x3 Gaussian pre-filtering of diffuse variance to stabilize luminance edge-stopping
+    // 3x3 Gaussian pre-filtering of variance
     const float g3[3] = float[3](0.25, 0.50, 0.25);
     float filteredVar = 0.0;
     float filteredSpecVar = 0.0;
@@ -144,27 +141,27 @@ void main() {
     filteredVar     /= max(varWSum, 1e-4);
     filteredSpecVar /= max(varWSum, 1e-4);
 
-    // Strict luminance edge-stopping (sigma_L default = 2.0, small epsilon 1e-3 to preserve contact shadows)
-    float lumaPhi = userSigmaL * sqrt(max(filteredVar, 1e-6)) + 1e-3;
+    // Paso 1 Anti-Boiling fix: boost luminance sigma on pixels with short history (historyLength < 4)
+    // so noisy disoccluded pixels merge smoothly instead of forming "boiling" blotches!
+    float lowHistSigmaBoost = mix(2.75, 1.0, clamp((histLen - 1.0) / 3.0, 0.0, 1.0));
+    float effectiveSigmaL = userSigmaL * lowHistSigmaBoost;
+    float lumaPhi = effectiveSigmaL * sqrt(max(filteredVar, 1e-5)) + mix(0.035, 1e-3, clamp((histLen - 1.0) / 3.0, 0.0, 1.0));
 
-    // Roughness-differentiated Specular spatial filtering:
-    // - If roughness < 0.15: completely omit spatial A-Trous blur (keep temporal value directly for mirror reflections)
-    // - For intermediate roughness (0.15..0.5): modulate spatial weight & radius by roughness and enforce strict roughness edge-stopping
+    // Paso 1 Specular fix: bypass spatial wavelet on smooth mirrors (roughness < 0.15) to keep reflections razor-sharp,
+    // and use a tight lobe-constrained kernel on glossy surfaces (0.15 .. 1.0).
     bool filterSpecular = (centerRough >= 0.15);
-    float specRoughFade = smoothstep(0.15, 0.50, centerRough);
-    float specLumaPhi = max(userSigmaL * mix(0.35, 1.0, specRoughFade) * sqrt(max(filteredSpecVar, 1e-6)) + 1e-3, 1e-4);
-    float maxSpecRadius = mix(1.5, 16.0, specRoughFade);
+    float specRoughFade = smoothstep(0.15, 0.55, centerRough);
+    float specLumaPhi = max(effectiveSigmaL * mix(0.30, 0.95, specRoughFade) * sqrt(max(filteredSpecVar, 1e-5)) + 2e-3, 1e-4);
+    float maxSpecRadius = mix(1.5, 12.0, specRoughFade * specRoughFade);
 
     const float h5[5] = float[5](0.0625, 0.25, 0.375, 0.25, 0.0625);
     vec3 sumIrr = centerIrr;
     float sumVar = centerVar;
     float sumW = 1.0;
-    float sumW2 = 1.0;
 
     vec3 sumSpec = centerSpec;
     float sumSVar = centerSVar;
     float sumSpecW = 1.0;
-    float sumSpecW2 = 1.0;
 
     for (int dy = -2; dy <= 2; ++dy) {
         for (int dx = -2; dx <= 2; ++dx) {
@@ -178,26 +175,23 @@ void main() {
             float qInst  = qDI.y;
             if (qDepth <= 0.0001) continue;
 
-            // 1. Instance ID edge-stopping
             if (abs(centerInst - qInst) > 0.5) continue;
 
-            // 2. Strict Normal edge-stopping: pow(max(0.0, dot(n0, n1)), sigma_N) (default 128.0)
             vec4 qNR = texelFetch(uNormalRoughIn, q, 0);
             vec3 qN = normalize(qNR.xyz);
             float qRough = clamp(qNR.w, 0.04, 1.0);
             float wN = pow(max(dot(centerN, qN), 0.0), userSigmaN);
             if (wN < 1e-4) continue;
 
-            // 3. Strict Depth edge-stopping using screen-space depth gradient
             float expectedDz = dot(depthGrad, abs(vec2(offset)));
             float depthDenom = max(userSigmaZ * expectedDz + 0.003 * centerDepth, 1e-4);
             float wZ = exp(-abs(centerDepth - qDepth) / depthDenom);
             if (wZ < 1e-4) continue;
 
-            float kernelW = h5[dx + 2] * h5[dy + 2] / 0.140625; // normalized so center=1
+            float kernelW = h5[dx + 2] * h5[dy + 2] / 0.140625;
             float geomW = kernelW * wN * wZ;
 
-            // Diffuse branch: full variance-guided A-Trous
+            // Demodulated Diffuse branch (albedo NEVER enters filter weights!)
             vec4 qIrrVar = texelFetch(uIrrVarIn, q, 0);
             if (!any(isnan(qIrrVar)) && !any(isinf(qIrrVar))) {
                 vec3 qIrr = max(qIrrVar.rgb, vec3(0.0));
@@ -208,31 +202,24 @@ void main() {
                     sumIrr += qIrr * wD;
                     sumVar += qVar * (wD * wD);
                     sumW   += wD;
-                    sumW2  += wD * wD;
                 }
             }
 
-            // Specular branch: only when roughness >= 0.15, modulated by roughness lobe & strict roughness edge-stopping
-            if (filterSpecular) {
-                float tapDist = length(vec2(offset));
-                if (tapDist <= maxSpecRadius) {
-                    vec4 qSpecVar = texelFetch(uSpecVarIn, q, 0);
-                    if (!any(isnan(qSpecVar)) && !any(isinf(qSpecVar))) {
-                        vec3 qSpec = max(qSpecVar.rgb, vec3(0.0));
-                        float qSVar = max(qSpecVar.a, 0.0);
-                        // Strict roughness edge-stopping to prevent bleeding glossy highlights onto matte surfaces
-                        float roughDiff = abs(centerRough - qRough);
-                        float wRough = exp(-roughDiff / max(0.05 * centerRough + 0.015, 0.01));
-                        // Sharper normal exponent for glossy reflections
-                        float wSpecN = pow(max(dot(centerN, qN), 0.0), max(userSigmaN, 192.0));
-                        float wSpecL = exp(-abs(centerSpecLuma - Luminance(qSpec)) / specLumaPhi);
-                        float wS = clamp(kernelW * wSpecN * wZ * wRough * wSpecL * specRoughFade, 0.0, 1.0);
-                        if (wS > 1e-4) {
-                            sumSpec   += qSpec * wS;
-                            sumSVar   += qSVar * (wS * wS);
-                            sumSpecW  += wS;
-                            sumSpecW2 += wS * wS;
-                        }
+            // Narrow Lobe-Guided Specular branch
+            if (filterSpecular && length(vec2(offset)) <= maxSpecRadius) {
+                vec4 qSpecVar = texelFetch(uSpecVarIn, q, 0);
+                if (!any(isnan(qSpecVar)) && !any(isinf(qSpecVar))) {
+                    vec3 qSpec = max(qSpecVar.rgb, vec3(0.0));
+                    float qSVar = max(qSpecVar.a, 0.0);
+                    float wRough = exp(-abs(centerRough - qRough) / max(0.05 * centerRough + 0.015, 0.01));
+                    float specNormalExp = mix(384.0, max(userSigmaN, 128.0), specRoughFade);
+                    float wSpecN = pow(max(dot(centerN, qN), 0.0), specNormalExp);
+                    float wSpecL = exp(-abs(centerSpecLuma - Luminance(qSpec)) / specLumaPhi);
+                    float wS = clamp(kernelW * wSpecN * wZ * wRough * wSpecL * specRoughFade, 0.0, 1.0);
+                    if (wS > 1e-4) {
+                        sumSpec  += qSpec * wS;
+                        sumSVar  += qSVar * (wS * wS);
+                        sumSpecW += wS;
                     }
                 }
             }
@@ -240,19 +227,20 @@ void main() {
     }
 
     vec3 outIrr = max(sumIrr / max(sumW, 1e-4), vec3(0.0));
-    float outVar = max(sumVar / max(sumW2, 1e-8), 0.0);
+    float outVar = max(sumVar / max(sumW * sumW, 1e-8), 0.0);
     if (any(isnan(outIrr)) || any(isinf(outIrr))) outIrr = centerIrr;
     if (isnan(outVar) || isinf(outVar)) outVar = centerVar;
 
-    // For roughness < 0.15, filterSpecular is false -> sumSpec == centerSpec and sumSpecW == 1.0 (exact temporal pass-through)
     vec3 outSpec = filterSpecular ? max(sumSpec / max(sumSpecW, 1e-4), vec3(0.0)) : centerSpec;
-    float outSVar = filterSpecular ? max(sumSVar / max(sumSpecW2, 1e-8), 0.0) : centerSVar;
+    float outSVar = filterSpecular ? max(sumSVar / max(sumSpecW * sumSpecW, 1e-8), 0.0) : centerSVar;
     if (any(isnan(outSpec)) || any(isinf(outSpec))) outSpec = centerSpec;
     if (isnan(outSVar) || isinf(outSVar)) outSVar = centerSVar;
 
     imageStore(uIrrVarOut, pix, vec4(outIrr, outVar));
     imageStore(uSpecVarOut, pix, vec4(outSpec, outSVar));
     if (pc.isLastPass != 0) {
+        vec3 primaryAlbedo = max(texelFetch(uAlbedoIn, pix, 0).rgb, vec3(0.0));
+        vec3 primaryEmissive = max(texelFetch(uEmissiveIn, pix, 0).rgb, vec3(0.0));
         imageStore(uHdrOut, pix, vec4(outIrr * primaryAlbedo + outSpec + primaryEmissive, 1.0));
     }
 }

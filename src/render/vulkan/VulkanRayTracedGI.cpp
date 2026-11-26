@@ -1,5 +1,6 @@
 #include "SlipEngine/render/vulkan/VulkanRayTracedGI.h"
 #include "SlipEngine/render/vulkan/VulkanContext.h"
+#include "SlipEngine/render/vulkan/VulkanStreamline.h"
 #include "SlipEngine/render/vulkan/SlipSpirvCompiler.h"
 #include "SlipEngine/render/SlipGraphicsSettings.h"
 #include "SlipEngine/tools/SlipFileSystem.h"
@@ -423,13 +424,20 @@ layout(set = 1, binding = 5) uniform GiParamsUBO {
     int giMode; int giBounces; int giRaysPerPixel; float giIntensity;
     float giTemporalAlpha; int giDenoiserEnabled; int giRayTracedShadows; int hasValidTLAS;
     int svgfAtrousIterations; float svgfSigmaLuminance; float svgfSigmaNormal; float svgfSigmaDepth;
+    int restirDIEnabled; int restirGIEnabled; int denoiserMode; float specVirtualParallax;
 } uGi;
 layout(set = 1, binding = 6, rgba16f) uniform writeonly image2D uPtNormalRoughOut;
 layout(set = 1, binding = 7, rgba16f) uniform image2D uPtAlbedoOut;
 layout(set = 1, binding = 8, rgba16f) uniform image2D uPtEmissiveOut;
-layout(set = 1, binding = 9, rgba32f) uniform writeonly image2D uPtDepthInstOut;
+layout(set = 1, binding = 9, rg32f)   uniform writeonly image2D uPtDepthInstOut;
 layout(set = 1, binding = 10, rg16f)  uniform writeonly image2D uPtMotionOut;
 layout(set = 1, binding = 11, rgba16f) uniform image2D uPtSpecAccum;
+layout(set = 1, binding = 12, rgba32f) uniform writeonly image2D uPtHitDistDepthOut;
+layout(set = 1, binding = 13, rgba16f) uniform writeonly image2D uPtSpecAlbedoOut;
+struct GpuDIReservoir { uint lightInfo; uint M; float weightSum; float targetPdf; vec2 lightRandUV; vec2 pad; };
+struct GpuGIReservoir { vec4 samplePosDist; vec4 sampleNormType; vec4 radianceTargetPdf; vec4 weights; };
+layout(set = 1, binding = 14, std430) writeonly buffer DiReservoirCurrBuf { GpuDIReservoir reservoirs[]; } uDiCurr;
+layout(set = 1, binding = 15, std430) writeonly buffer GiReservoirCurrBuf { GpuGIReservoir reservoirs[]; } uGiCurr;
 const float PI = 3.14159265359;
 uint PcgHash(uint v) { uint s = v * 747796405u + 2891336453u; uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
 float Rand01(inout uint seed) { seed = PcgHash(seed); return float(seed) * (1.0 / 4294967296.0); }
@@ -555,17 +563,24 @@ void EvaluateBRDFSplit(vec3 N, vec3 V, vec3 L, vec3 rad, vec3 albedo, float roug
 vec3 EvaluateBRDF(vec3 N, vec3 V, vec3 L, vec3 rad, vec3 albedo, float rough, float metal) {
     vec3 dI, sR; EvaluateBRDFSplit(N, V, L, rad, albedo, rough, metal, dI, sR); return dI * albedo + sR;
 }
-vec3 ApplyNormalMap(vec3 geomN, vec3 localT, vec3 localB, mat4x3 worldToObj, vec2 uv, GpuMaterialData mat) {
+vec3 LocalToWorld(mat4x3 w2o, mat3 o2w, vec3 p) { return o2w * (p - w2o[3]); }
+void UvDifferentials(vec3 p0, vec3 p1, vec3 p2, vec2 uv0, vec2 uv1, vec2 uv2, vec3 dPdx, vec3 dPdy, out vec2 duvdx, out vec2 duvdy) {
+    vec3 e1 = p1 - p0; vec3 e2 = p2 - p0; vec2 d1 = uv1 - uv0; vec2 d2 = uv2 - uv0; vec3 n = cross(e1, e2);
+    float invA = 1.0 / max(dot(n, n), 1e-12);
+    duvdx = clamp(d1 * (dot(cross(dPdx, e2), n) * invA) + d2 * (dot(cross(e1, dPdx), n) * invA), vec2(-0.25), vec2(0.25));
+    duvdy = clamp(d1 * (dot(cross(dPdy, e2), n) * invA) + d2 * (dot(cross(e1, dPdy), n) * invA), vec2(-0.25), vec2(0.25));
+}
+vec4 SampleTex(int texIndex, vec2 uv, vec2 duvdx, vec2 duvdy) { return textureGrad(uTextures[nonuniformEXT(texIndex)], uv, duvdx, duvdy); }
+vec3 ApplyNormalMap(vec3 geomN, vec3 localT, vec3 localB, mat3 objToWorld, vec2 uv, vec2 duvdx, vec2 duvdy, GpuMaterialData mat) {
     vec3 N = geomN;
     if (mat.texIndices0.y < 0 || dot(localT, localT) < 1e-8 || dot(localB, localB) < 1e-8) return N;
-    mat3 objToWorld = inverse(mat3(worldToObj));
     vec3 T = objToWorld * localT; vec3 B = objToWorld * localB;
     T = T - N * dot(T, N); B = B - N * dot(B, N);
     if (dot(T, T) < 1e-8 || dot(B, B) < 1e-8) return N;
     T = normalize(T); B = normalize(B - T * dot(B, T));
     if (dot(B, B) < 1e-8) return N;
     if (dot(cross(N, T), B) < 0.0) B = -B;
-    vec3 mapN = textureLod(uTextures[nonuniformEXT(mat.texIndices0.y)], uv, 0.0).xyz * 2.0 - 1.0;
+    vec3 mapN = SampleTex(mat.texIndices0.y, uv, duvdx, duvdy).xyz * 2.0 - 1.0;
     mapN.xy *= mat.pbrParams.w;
     return normalize(mat3(T, B, N) * mapN);
 }
@@ -643,6 +658,12 @@ void main() {
             primaryEmis = EvaluateVolumetricClouds(ro, rd, EvaluateSky(rd, true), ign);
         } else {
             vec3 tp = vec3(1.0); bool firstIsSpec = false;
+            vec2 ndc = uv * 2.0 - 1.0; vec2 px = vec2(2.0) / vec2(size);
+            vec4 farX = uScene.invViewProj * vec4(ndc + vec2(px.x, 0.0), 1.0, 1.0);
+            vec4 farY = uScene.invViewProj * vec4(ndc + vec2(0.0, px.y), 1.0, 1.0);
+            vec3 rdX = normalize(farX.xyz / max(abs(farX.w), 1e-6) - ro);
+            vec3 rdY = normalize(farY.xyz / max(abs(farY.w), 1e-6) - ro);
+            float coneAngle = max(length(rdX - rd), length(rdY - rd));
             for (int b = 0; b < maxB; ++b) {
                 rayQueryEXT rq; rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT, 0xFFu, ro, 0.001, rd, 500.0);
                 while (rayQueryProceedEXT(rq)) {}
@@ -678,39 +699,52 @@ const char* kFallbackPathtraceCompC = R"GLSL(                float tHit = rayQue
                               vec3(vBuf.data[b1+13u], vBuf.data[b1+14u], vBuf.data[b1+15u]) * w.y +
                               vec3(vBuf.data[b2+13u], vBuf.data[b2+14u], vBuf.data[b2+15u]) * w.z;
                 mat4x3 worldToObj = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
+                mat3 objToWorld = inverse(mat3(worldToObj));
                 vec3 N = normalize(transpose(mat3(worldToObj)) * localN);
                 if (dot(N, -rd) < 0.0) N = -N;
-                vec2 hitUv = vec2(vBuf.data[b0+6u], vBuf.data[b0+7u]) * w.x +
-                             vec2(vBuf.data[b1+6u], vBuf.data[b1+7u]) * w.y +
-                             vec2(vBuf.data[b2+6u], vBuf.data[b2+7u]) * w.z;
+                vec2 uv0 = vec2(vBuf.data[b0+6u], vBuf.data[b0+7u]);
+                vec2 uv1 = vec2(vBuf.data[b1+6u], vBuf.data[b1+7u]);
+                vec2 uv2 = vec2(vBuf.data[b2+6u], vBuf.data[b2+7u]);
+                vec2 hitUv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
                 vec3 hitPos = ro + rd * tHit; vec3 V = -rd;
+                vec3 wp0 = LocalToWorld(worldToObj, objToWorld, vec3(vBuf.data[b0], vBuf.data[b0+1u], vBuf.data[b0+2u]));
+                vec3 wp1 = LocalToWorld(worldToObj, objToWorld, vec3(vBuf.data[b1], vBuf.data[b1+1u], vBuf.data[b1+2u]));
+                vec3 wp2 = LocalToWorld(worldToObj, objToWorld, vec3(vBuf.data[b2], vBuf.data[b2+1u], vBuf.data[b2+2u]));
+                vec3 Ng = cross(wp1 - wp0, wp2 - wp0);
+                Ng = dot(Ng, Ng) > 1e-12 ? normalize(Ng) : N;
+                if (dot(Ng, -rd) < 0.0) Ng = -Ng;
+                float plane = dot(hitPos - ro, Ng);
+                float tx = abs(dot(rdX, Ng)) > 1e-5 ? clamp(plane / dot(rdX, Ng), 0.0, 500.0) : tHit;
+                float ty = abs(dot(rdY, Ng)) > 1e-5 ? clamp(plane / dot(rdY, Ng), 0.0, 500.0) : tHit;
+                vec2 duvdx, duvdy;
+                UvDifferentials(wp0, wp1, wp2, uv0, uv1, uv2, (ro + rdX * tx) - hitPos, (ro + rdY * ty) - hitPos, duvdx, duvdy);
                 GpuMaterialData mat = uMaterials.materials[info.materialIndex];
-                N = ApplyNormalMap(N, localT, localB, worldToObj, hitUv, mat);
+                N = ApplyNormalMap(N, localT, localB, objToWorld, hitUv, duvdx, duvdy, mat);
                 vec3 hitAlbedo = mat.albedoColor.rgb;
-                if (mat.texIndices0.x >= 0) hitAlbedo *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.x)], hitUv, 0.0).rgb;
+                if (mat.texIndices0.x >= 0) hitAlbedo *= SampleTex(mat.texIndices0.x, hitUv, duvdx, duvdy).rgb;
                 hitAlbedo = max(hitAlbedo, vec3(0.0));
                 float rough = clamp(mat.pbrParams.x, 0.04, 1.0);
-                if (mat.texIndices0.z >= 0) rough *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.z)], hitUv, 0.0).g;
+                if (mat.texIndices0.z >= 0) rough *= SampleTex(mat.texIndices0.z, hitUv, duvdx, duvdy).g;
                 if (mat.extraParams.z > 0.5) rough = 1.0 - rough;
                 rough = clamp(rough, 0.04, 1.0);
                 float metal = clamp(mat.pbrParams.y, 0.0, 1.0);
-                if (mat.texIndices0.w >= 0) metal *= textureLod(uTextures[nonuniformEXT(mat.texIndices0.w)], hitUv, 0.0).b;
+                if (mat.texIndices0.w >= 0) metal *= SampleTex(mat.texIndices0.w, hitUv, duvdx, duvdy).b;
                 metal = clamp(metal, 0.0, 1.0);
                 vec3 hitEmis = mat.emissiveColor.rgb * mat.emissiveColor.a;
-                if (mat.texIndices1.y >= 0) hitEmis *= textureLod(uTextures[nonuniformEXT(mat.texIndices1.y)], hitUv, 0.0).rgb;
+                if (mat.texIndices1.y >= 0) hitEmis *= SampleTex(mat.texIndices1.y, hitUv, duvdx, duvdy).rgb;
                 vec3 F0 = mix(vec3(0.04), hitAlbedo, metal);
                 if (b == 0) {
                     primaryAlb = hitAlbedo;
                     primaryEmis = hitEmis;
                     if (sIdx == 0u) {
                         primaryNormOut = N; primaryRoughOut = rough; primaryMetalOut = metal;
-                        primaryDepthOut = tHit; primaryInstOut = float(instIdx + 1u);
                         vec3 localPos = vec3(vBuf.data[b0+0u], vBuf.data[b0+1u], vBuf.data[b0+2u]) * w.x +
                                         vec3(vBuf.data[b1+0u], vBuf.data[b1+1u], vBuf.data[b1+2u]) * w.y +
                                         vec3(vBuf.data[b2+0u], vBuf.data[b2+1u], vBuf.data[b2+2u]) * w.z;
                         vec3 prevW = (info.prevModel * vec4(localPos, 1.0)).xyz;
                         vec4 cC = uScene.currViewProj * vec4(hitPos, 1.0);
                         vec4 pC = uScene.prevViewProj * vec4(prevW, 1.0);
+                        primaryDepthOut = cC.w; primaryInstOut = float(instIdx + 1u);
                         primaryMotionOut = ((cC.xy / max(abs(cC.w), 1e-6)) - (pC.xy / max(abs(pC.w), 1e-6))) * 0.5;
                         primaryWindowZ = clamp(cC.z / max(abs(cC.w), 1e-6), 0.0, 1.0);
                     }
@@ -750,7 +784,10 @@ const char* kFallbackPathtraceCompC = R"GLSL(                float tHit = rayQue
                 }
                 tp *= bw * ((b == 0) ? (firstIsSpec ? 1.0 : max(uGi.giIntensity, 0.0)) : 1.0);
                 if (b >= 2) { float ps = clamp(max(tp.r, max(tp.g, tp.b)), 0.05, 0.95); if (bnLobe.y > ps) break; tp /= ps; }
+                coneAngle = min(coneAngle + rough * 0.45, 0.75);
+                vec3 coneT, coneB; BuildBasis(nextDir, coneT, coneB);
                 ro = hitPos + N * 0.004; rd = nextDir;
+                rdX = normalize(rd + coneT * coneAngle); rdY = normalize(rd + coneB * coneAngle);
             }
         }
         sDiffIrr = min(max(sDiffIrr, vec3(0.0)), vec3(24.0));
@@ -777,11 +814,50 @@ const char* kFallbackPathtraceCompC = R"GLSL(                float tHit = rayQue
     imageStore(uPtNormalRoughOut, pix, vec4(primaryNormOut, primaryRoughOut));
     imageStore(uPtAlbedoOut, pix, vec4(outAlbedo, primaryMetalOut));
     imageStore(uPtEmissiveOut, pix, vec4(outEmissive, 1.0));
-    imageStore(uPtDepthInstOut, pix, vec4(primaryDepthOut, primaryInstOut, primaryWindowZ, 0.0));
+    imageStore(uPtDepthInstOut, pix, vec4(primaryDepthOut, primaryInstOut, 0.0, 0.0));
     imageStore(uPtMotionOut, pix, vec4(primaryMotionOut, 0.0, 0.0));
+    imageStore(uPtHitDistDepthOut, pix, vec4(50.0, 50.0, primaryWindowZ, primaryDepthOut));
+    imageStore(uPtSpecAlbedoOut, pix, vec4(mix(vec3(0.04), outAlbedo, primaryMetalOut), 1.0));
+    uint pIdx = uint(pix.y) * uint(size.x) + uint(pix.x);
+    GpuDIReservoir d0; d0.lightInfo = 0u; d0.M = 0u; d0.weightSum = 0.0; d0.targetPdf = 0.0; d0.lightRandUV = vec2(0.5); d0.pad = vec2(0.0);
+    GpuGIReservoir g0; g0.samplePosDist = vec4(0.0); g0.sampleNormType = vec4(0.0); g0.radianceTargetPdf = vec4(0.0); g0.weights = vec4(0.0);
+    if (isRealtimeSvgf) { uDiCurr.reservoirs[pIdx] = d0; uGiCurr.reservoirs[pIdx] = g0; }
     imageStore(uPtAccum, pix, vec4(outDiffIrr, 1.0));
     imageStore(uPtSpecAccum, pix, vec4(outSpecRad, 1.0));
     imageStore(uHdrOut, pix, vec4(outDiffIrr * outAlbedo + outSpecRad + outEmissive, 1.0));
+}
+)GLSL";
+
+const char* kFallbackPtRestirReuseComp = R"GLSL(#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_scalar_block_layout : require
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+struct GpuDIReservoir { uint lightInfo; uint M; float weightSum; float targetPdf; vec2 lightRandUV; vec2 pad; };
+struct GpuGIReservoir { vec4 samplePosDist; vec4 sampleNormType; vec4 radianceTargetPdf; vec4 weights; };
+layout(set = 0, binding = 0)  uniform sampler2D uCurrNormalRough;
+layout(set = 0, binding = 1)  uniform sampler2D uCurrDepthInst;
+layout(set = 0, binding = 2)  uniform sampler2D uPrevNormalRough;
+layout(set = 0, binding = 3)  uniform sampler2D uPrevDepthInst;
+layout(set = 0, binding = 4)  uniform sampler2D uMotionTex;
+layout(set = 0, binding = 5)  uniform sampler2D uAlbedoTex;
+layout(set = 0, binding = 6)  uniform sampler2D uHitDistDepthTex;
+layout(set = 0, binding = 7)  uniform accelerationStructureEXT uTLAS;
+layout(set = 0, binding = 8)  uniform SceneLightingUBO { mat4 invViewProj; vec4 cameraPos; } uScene;
+layout(set = 0, binding = 9)  uniform GiParamsUBO { uint width; uint height; uint frameIndex; uint sampleCount; } uGi;
+layout(set = 0, binding = 10, std430) readonly  buffer DiCurrBuf    { GpuDIReservoir reservoirs[]; } uDiCurr;
+layout(set = 0, binding = 11, std430) readonly  buffer DiPrevBuf    { GpuDIReservoir reservoirs[]; } uDiPrev;
+layout(set = 0, binding = 12, std430) writeonly buffer DiHistOutBuf { GpuDIReservoir reservoirs[]; } uDiHistOut;
+layout(set = 0, binding = 13, std430) readonly  buffer GiCurrBuf    { GpuGIReservoir reservoirs[]; } uGiCurr;
+layout(set = 0, binding = 14, std430) readonly  buffer GiPrevBuf    { GpuGIReservoir reservoirs[]; } uGiPrev;
+layout(set = 0, binding = 15, std430) writeonly buffer GiHistOutBuf { GpuGIReservoir reservoirs[]; } uGiHistOut;
+layout(set = 0, binding = 16, rgba16f) uniform image2D uPtAccum;
+layout(set = 0, binding = 17, rgba16f) uniform image2D uPtSpecAccum;
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy); ivec2 size = imageSize(uPtAccum);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+    uint idx = uint(pix.y) * uint(size.x) + uint(pix.x);
+    uDiHistOut.reservoirs[idx] = uDiCurr.reservoirs[idx];
+    uGiHistOut.reservoirs[idx] = uGiCurr.reservoirs[idx];
 }
 )GLSL";
 
@@ -897,6 +973,8 @@ layout(set = 0, binding = 10) uniform GiParamsUBO {
 layout(set = 0, binding = 11) uniform sampler2D uCurrRawSpec;
 layout(set = 0, binding = 12) uniform sampler2D uPrevSpecHistory;
 layout(set = 0, binding = 13, rgba16f) uniform writeonly image2D uCurrSpecHistoryOut;
+layout(set = 0, binding = 14) uniform sampler2D uHitDistDepth;
+layout(set = 0, binding = 15) uniform SceneLightingUBO { mat4 invViewProj; vec4 cameraPos; } uScene;
 float Luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 void main() {
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy); ivec2 size = imageSize(uCurrIrrHistoryOut);
@@ -1211,10 +1289,38 @@ void main() {
 }
 )GLSL";
 
+const char* kFallbackPtReblurSpatialComp = R"GLSL(#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D uIrrHitIn;
+layout(set = 0, binding = 1) uniform sampler2D uMomentsIn;
+layout(set = 0, binding = 2) uniform sampler2D uNormalRoughIn;
+layout(set = 0, binding = 3) uniform sampler2D uDepthInstIn;
+layout(set = 0, binding = 4) uniform sampler2D uHitDistDepthIn;
+layout(set = 0, binding = 5) uniform SceneLightingUBO { mat4 invViewProj; vec4 cameraPos; } uScene;
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D uIrrHitOut;
+layout(set = 0, binding = 7) uniform GiParamsUBO { uint width; uint height; uint frameIndex; uint sampleCount; } uGi;
+layout(set = 0, binding = 8) uniform sampler2D uSpecHitIn;
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D uSpecHitOut;
+layout(push_constant) uniform ReblurPC { int passIndex; float radiusScale; } pc;
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy); ivec2 size = imageSize(uIrrHitOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+    imageStore(uIrrHitOut, pix, texelFetch(uIrrHitIn, pix, 0));
+    imageStore(uSpecHitOut, pix, texelFetch(uSpecHitIn, pix, 0));
+}
+)GLSL";
+
 std::string LoadShaderTextWithFallback(const std::string& relPath, const std::string& fallback) {
+    const std::string candidates[] = {
+        relPath,
+        "../" + relPath,
+        "../../" + relPath
+    };
     std::string text;
-    if (SlipFileSystem::Exists(relPath) && SlipFileSystem::ReadAllText(relPath, text) && !text.empty()) {
-        return text;
+    for (const auto& path : candidates) {
+        if (SlipFileSystem::Exists(path) && SlipFileSystem::ReadAllText(path, text) && !text.empty()) {
+            return text;
+        }
     }
     return fallback;
 }
@@ -1263,15 +1369,15 @@ bool VulkanRayTracedGI::Initialize(VulkanContext* context, VkDescriptorSetLayout
     VkDevice device = context->GetDevice();
 
     std::array<VkDescriptorPoolSize, 5> poolSizes = {{
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 200 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 100 },
-        { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 8 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 64 }
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 360 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 180 },
+        { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 16 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 128 }
     }};
     VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = 40;
+    poolInfo.maxSets = 64;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_Pool) != VK_SUCCESS) {
@@ -1342,25 +1448,52 @@ bool VulkanRayTracedGI::Initialize(VulkanContext* context, VkDescriptorSetLayout
         }
     }
 
-    // 3. Path Tracing Set Layout
+    // 3. Path Tracing Set Layout (includes HitDist+Depth, SpecularAlbedo, and ReSTIR initial reservoirs)
     {
-        std::array<VkDescriptorSetLayoutBinding, 12> b{};
-        b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[1] = { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[2] = { 2, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[3] = { 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[4] = { 4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[5] = { 5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[6] = { 6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[7] = { 7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[8] = { 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[9] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[10] = { 10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-        b[11] = { 11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        std::array<VkDescriptorSetLayoutBinding, 16> b{};
+        b[0]  = { 0,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[1]  = { 1,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[2]  = { 2,  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[3]  = { 3,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[4]  = { 4,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[5]  = { 5,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[6]  = { 6,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[7]  = { 7,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[8]  = { 8,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[9]  = { 9,  VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[10] = { 10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[11] = { 11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[12] = { 12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[13] = { 13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[14] = { 14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[15] = { 15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
         VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         info.bindingCount = static_cast<uint32_t>(b.size());
         info.pBindings = b.data();
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &m_PtLayout) != VK_SUCCESS) {
+            Shutdown(context);
+            return false;
+        }
+    }
+
+    // 3B. Path Tracing ReSTIR DI + ReSTIR GI Spatiotemporal Reuse Set Layout
+    {
+        std::array<VkDescriptorSetLayoutBinding, 18> b{};
+        for (uint32_t j = 0; j < 7; ++j) {
+            b[j] = { j, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        }
+        b[7] = { 7, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[8] = { 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[9] = { 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        for (uint32_t j = 10; j < 16; ++j) {
+            b[j] = { j, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        }
+        b[16] = { 16, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[17] = { 17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        info.bindingCount = static_cast<uint32_t>(b.size());
+        info.pBindings = b.data();
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &m_PtRestirReuseLayout) != VK_SUCCESS) {
             Shutdown(context);
             return false;
         }
@@ -1387,9 +1520,9 @@ bool VulkanRayTracedGI::Initialize(VulkanContext* context, VkDescriptorSetLayout
         }
     }
 
-    // 4B. Path Tracing SVGF Temporal Reprojection Set Layout (Diffuse + Specular)
+    // 4B. Path Tracing SVGF / NRD ReBLUR Temporal Reprojection Set Layout (Diffuse + Virtual-Pos Specular + HitDist)
     {
-        std::array<VkDescriptorSetLayoutBinding, 14> b{};
+        std::array<VkDescriptorSetLayoutBinding, 16> b{};
         for (uint32_t j = 0; j < 8; ++j) {
             b[j] = { j, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
         }
@@ -1399,6 +1532,8 @@ bool VulkanRayTracedGI::Initialize(VulkanContext* context, VkDescriptorSetLayout
         b[11] = { 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
         b[12] = { 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
         b[13] = { 13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[14] = { 14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[15] = { 15, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
         VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         info.bindingCount = static_cast<uint32_t>(b.size());
         info.pBindings = b.data();
@@ -1446,16 +1581,38 @@ bool VulkanRayTracedGI::Initialize(VulkanContext* context, VkDescriptorSetLayout
         }
     }
 
+    // 4E. Path Tracing NRD ReBLUR Hit-Distance Spatial Poisson Set Layout
+    {
+        std::array<VkDescriptorSetLayoutBinding, 10> b{};
+        for (uint32_t j = 0; j < 5; ++j) {
+            b[j] = { j, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        }
+        b[5] = { 5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[6] = { 6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[7] = { 7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[8] = { 8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[9] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        VkDescriptorSetLayoutCreateInfo info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        info.bindingCount = static_cast<uint32_t>(b.size());
+        info.pBindings = b.data();
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &m_PtReblurSpatialLayout) != VK_SUCCESS) {
+            Shutdown(context);
+            return false;
+        }
+    }
+
     for (uint32_t i = 0; i < kFrameSlots; ++i) {
-        std::array<VkDescriptorSetLayout, 14> layouts = {
+        std::array<VkDescriptorSetLayout, 18> layouts = {
             m_RtgiTraceLayout, m_RtgiDenoiseLayout,
             m_RtgiAtrousLayout, m_RtgiAtrousLayout, m_RtgiAtrousLayout,
             m_PtLayout, m_PtDenoiseLayout,
             m_PtSvgfTemporalLayout,
             m_PtSvgfAtrousLayout, m_PtSvgfAtrousLayout, m_PtSvgfAtrousLayout, m_PtSvgfAtrousLayout, m_PtSvgfAtrousLayout,
-            m_PtSvgfModulateLayout
+            m_PtSvgfModulateLayout,
+            m_PtRestirReuseLayout,
+            m_PtReblurSpatialLayout, m_PtReblurSpatialLayout, m_PtReblurSpatialLayout
         };
-        std::array<VkDescriptorSet, 14> sets{};
+        std::array<VkDescriptorSet, 18> sets{};
         VkDescriptorSetAllocateInfo alloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
         alloc.descriptorPool = m_Pool;
         alloc.descriptorSetCount = static_cast<uint32_t>(layouts.size());
@@ -1478,6 +1635,10 @@ bool VulkanRayTracedGI::Initialize(VulkanContext* context, VkDescriptorSetLayout
         m_PtSvgfAtrousSets[i][3] = sets[11];
         m_PtSvgfAtrousSets[i][4] = sets[12];
         m_PtSvgfModulateSets[i] = sets[13];
+        m_PtRestirReuseSets[i] = sets[14];
+        m_PtReblurSpatialSets[i][0] = sets[15];
+        m_PtReblurSpatialSets[i][1] = sets[16];
+        m_PtReblurSpatialSets[i][2] = sets[17];
     }
 
     if (!CreatePipelines(context, bindlessSetLayout)) {
@@ -1685,6 +1846,71 @@ bool VulkanRayTracedGI::CreatePipelines(VulkanContext* context, VkDescriptorSetL
         if (r != VK_SUCCESS) return false;
     }
 
+    // 9. Path Tracing ReSTIR DI + ReSTIR GI Spatiotemporal Reuse Pipeline
+    {
+        std::string src = LoadShaderTextWithFallback("shaders/vulkan/pt_restir_reuse.comp", kFallbackPtRestirReuseComp);
+        VkShaderModule mod = CompileComputeModule(device, src, "pt_restir_reuse.comp");
+        if (mod == VK_NULL_HANDLE) return false;
+
+        VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        plInfo.setLayoutCount = 1;
+        plInfo.pSetLayouts = &m_PtRestirReuseLayout;
+        if (vkCreatePipelineLayout(device, &plInfo, nullptr, &m_PtRestirReusePipeLayout) != VK_SUCCESS) {
+            vkDestroyShaderModule(device, mod, nullptr);
+            return false;
+        }
+
+        VkComputePipelineCreateInfo cp{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cp.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr };
+        cp.layout = m_PtRestirReusePipeLayout;
+        VkResult r = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cp, nullptr, &m_PtRestirReusePipeline);
+        vkDestroyShaderModule(device, mod, nullptr);
+        if (r != VK_SUCCESS) return false;
+    }
+
+    // 10. Path Tracing NRD ReBLUR Temporal Pipeline (shares m_PtSvgfTemporalPipeLayout)
+    {
+        std::string src = LoadShaderTextWithFallback("shaders/vulkan/pt_reblur_temporal.comp", kFallbackPtSvgfTemporalComp);
+        VkShaderModule mod = CompileComputeModule(device, src, "pt_reblur_temporal.comp");
+        if (mod == VK_NULL_HANDLE) return false;
+
+        VkComputePipelineCreateInfo cp{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cp.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr };
+        cp.layout = m_PtSvgfTemporalPipeLayout;
+        VkResult r = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cp, nullptr, &m_PtReblurTemporalPipeline);
+        vkDestroyShaderModule(device, mod, nullptr);
+        if (r != VK_SUCCESS) return false;
+    }
+
+    // 11. Path Tracing NRD ReBLUR Spatial Hit-Distance Poisson Pipeline
+    {
+        std::string src = LoadShaderTextWithFallback("shaders/vulkan/pt_reblur_spatial.comp", kFallbackPtReblurSpatialComp);
+        VkShaderModule mod = CompileComputeModule(device, src, "pt_reblur_spatial.comp");
+        if (mod == VK_NULL_HANDLE) return false;
+
+        VkPushConstantRange pcRange{};
+        pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pcRange.offset = 0;
+        pcRange.size = sizeof(int32_t) + sizeof(float);
+
+        VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        plInfo.setLayoutCount = 1;
+        plInfo.pSetLayouts = &m_PtReblurSpatialLayout;
+        plInfo.pushConstantRangeCount = 1;
+        plInfo.pPushConstantRanges = &pcRange;
+        if (vkCreatePipelineLayout(device, &plInfo, nullptr, &m_PtReblurSpatialPipeLayout) != VK_SUCCESS) {
+            vkDestroyShaderModule(device, mod, nullptr);
+            return false;
+        }
+
+        VkComputePipelineCreateInfo cp{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cp.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr };
+        cp.layout = m_PtReblurSpatialPipeLayout;
+        VkResult r = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cp, nullptr, &m_PtReblurSpatialPipeline);
+        vkDestroyShaderModule(device, mod, nullptr);
+        if (r != VK_SUCCESS) return false;
+    }
+
     return true;
 }
 
@@ -1706,12 +1932,17 @@ void VulkanRayTracedGI::Shutdown(VulkanContext* context) {
         if (m_RtgiAtrousPipeLayout) { vkDestroyPipelineLayout(device, m_RtgiAtrousPipeLayout, nullptr); m_RtgiAtrousPipeLayout = VK_NULL_HANDLE; }
         if (m_PtPipeline) { vkDestroyPipeline(device, m_PtPipeline, nullptr); m_PtPipeline = VK_NULL_HANDLE; }
         if (m_PtPipeLayout) { vkDestroyPipelineLayout(device, m_PtPipeLayout, nullptr); m_PtPipeLayout = VK_NULL_HANDLE; }
+        if (m_PtRestirReusePipeline) { vkDestroyPipeline(device, m_PtRestirReusePipeline, nullptr); m_PtRestirReusePipeline = VK_NULL_HANDLE; }
+        if (m_PtRestirReusePipeLayout) { vkDestroyPipelineLayout(device, m_PtRestirReusePipeLayout, nullptr); m_PtRestirReusePipeLayout = VK_NULL_HANDLE; }
         if (m_PtDenoisePipeline) { vkDestroyPipeline(device, m_PtDenoisePipeline, nullptr); m_PtDenoisePipeline = VK_NULL_HANDLE; }
         if (m_PtDenoisePipeLayout) { vkDestroyPipelineLayout(device, m_PtDenoisePipeLayout, nullptr); m_PtDenoisePipeLayout = VK_NULL_HANDLE; }
         if (m_PtSvgfTemporalPipeline) { vkDestroyPipeline(device, m_PtSvgfTemporalPipeline, nullptr); m_PtSvgfTemporalPipeline = VK_NULL_HANDLE; }
+        if (m_PtReblurTemporalPipeline) { vkDestroyPipeline(device, m_PtReblurTemporalPipeline, nullptr); m_PtReblurTemporalPipeline = VK_NULL_HANDLE; }
         if (m_PtSvgfTemporalPipeLayout) { vkDestroyPipelineLayout(device, m_PtSvgfTemporalPipeLayout, nullptr); m_PtSvgfTemporalPipeLayout = VK_NULL_HANDLE; }
         if (m_PtSvgfAtrousPipeline) { vkDestroyPipeline(device, m_PtSvgfAtrousPipeline, nullptr); m_PtSvgfAtrousPipeline = VK_NULL_HANDLE; }
         if (m_PtSvgfAtrousPipeLayout) { vkDestroyPipelineLayout(device, m_PtSvgfAtrousPipeLayout, nullptr); m_PtSvgfAtrousPipeLayout = VK_NULL_HANDLE; }
+        if (m_PtReblurSpatialPipeline) { vkDestroyPipeline(device, m_PtReblurSpatialPipeline, nullptr); m_PtReblurSpatialPipeline = VK_NULL_HANDLE; }
+        if (m_PtReblurSpatialPipeLayout) { vkDestroyPipelineLayout(device, m_PtReblurSpatialPipeLayout, nullptr); m_PtReblurSpatialPipeLayout = VK_NULL_HANDLE; }
         if (m_PtSvgfModulatePipeline) { vkDestroyPipeline(device, m_PtSvgfModulatePipeline, nullptr); m_PtSvgfModulatePipeline = VK_NULL_HANDLE; }
         if (m_PtSvgfModulatePipeLayout) { vkDestroyPipelineLayout(device, m_PtSvgfModulatePipeLayout, nullptr); m_PtSvgfModulatePipeLayout = VK_NULL_HANDLE; }
 
@@ -1720,15 +1951,17 @@ void VulkanRayTracedGI::Shutdown(VulkanContext* context) {
         if (m_RtgiDenoiseLayout) { vkDestroyDescriptorSetLayout(device, m_RtgiDenoiseLayout, nullptr); m_RtgiDenoiseLayout = VK_NULL_HANDLE; }
         if (m_RtgiAtrousLayout) { vkDestroyDescriptorSetLayout(device, m_RtgiAtrousLayout, nullptr); m_RtgiAtrousLayout = VK_NULL_HANDLE; }
         if (m_PtLayout) { vkDestroyDescriptorSetLayout(device, m_PtLayout, nullptr); m_PtLayout = VK_NULL_HANDLE; }
+        if (m_PtRestirReuseLayout) { vkDestroyDescriptorSetLayout(device, m_PtRestirReuseLayout, nullptr); m_PtRestirReuseLayout = VK_NULL_HANDLE; }
         if (m_PtDenoiseLayout) { vkDestroyDescriptorSetLayout(device, m_PtDenoiseLayout, nullptr); m_PtDenoiseLayout = VK_NULL_HANDLE; }
         if (m_PtSvgfTemporalLayout) { vkDestroyDescriptorSetLayout(device, m_PtSvgfTemporalLayout, nullptr); m_PtSvgfTemporalLayout = VK_NULL_HANDLE; }
         if (m_PtSvgfAtrousLayout) { vkDestroyDescriptorSetLayout(device, m_PtSvgfAtrousLayout, nullptr); m_PtSvgfAtrousLayout = VK_NULL_HANDLE; }
+        if (m_PtReblurSpatialLayout) { vkDestroyDescriptorSetLayout(device, m_PtReblurSpatialLayout, nullptr); m_PtReblurSpatialLayout = VK_NULL_HANDLE; }
         if (m_PtSvgfModulateLayout) { vkDestroyDescriptorSetLayout(device, m_PtSvgfModulateLayout, nullptr); m_PtSvgfModulateLayout = VK_NULL_HANDLE; }
     } else {
-        m_RtgiTracePipeline = m_RtgiDenoisePipeline = m_RtgiAtrousPipeline = m_PtPipeline = m_PtDenoisePipeline = m_PtSvgfTemporalPipeline = m_PtSvgfAtrousPipeline = m_PtSvgfModulatePipeline = VK_NULL_HANDLE;
-        m_RtgiTracePipeLayout = m_RtgiDenoisePipeLayout = m_RtgiAtrousPipeLayout = m_PtPipeLayout = m_PtDenoisePipeLayout = m_PtSvgfTemporalPipeLayout = m_PtSvgfAtrousPipeLayout = m_PtSvgfModulatePipeLayout = VK_NULL_HANDLE;
+        m_RtgiTracePipeline = m_RtgiDenoisePipeline = m_RtgiAtrousPipeline = m_PtPipeline = m_PtRestirReusePipeline = m_PtDenoisePipeline = m_PtSvgfTemporalPipeline = m_PtReblurTemporalPipeline = m_PtSvgfAtrousPipeline = m_PtReblurSpatialPipeline = m_PtSvgfModulatePipeline = VK_NULL_HANDLE;
+        m_RtgiTracePipeLayout = m_RtgiDenoisePipeLayout = m_RtgiAtrousPipeLayout = m_PtPipeLayout = m_PtRestirReusePipeLayout = m_PtDenoisePipeLayout = m_PtSvgfTemporalPipeLayout = m_PtSvgfAtrousPipeLayout = m_PtReblurSpatialPipeLayout = m_PtSvgfModulatePipeLayout = VK_NULL_HANDLE;
         m_Pool = VK_NULL_HANDLE;
-        m_RtgiTraceLayout = m_RtgiDenoiseLayout = m_RtgiAtrousLayout = m_PtLayout = m_PtDenoiseLayout = m_PtSvgfTemporalLayout = m_PtSvgfAtrousLayout = m_PtSvgfModulateLayout = VK_NULL_HANDLE;
+        m_RtgiTraceLayout = m_RtgiDenoiseLayout = m_RtgiAtrousLayout = m_PtLayout = m_PtRestirReuseLayout = m_PtDenoiseLayout = m_PtSvgfTemporalLayout = m_PtSvgfAtrousLayout = m_PtReblurSpatialLayout = m_PtSvgfModulateLayout = VK_NULL_HANDLE;
         m_TargetsCreated = false;
     }
 
@@ -1739,10 +1972,14 @@ void VulkanRayTracedGI::Shutdown(VulkanContext* context) {
         m_RtgiAtrousSets[i][1] = VK_NULL_HANDLE;
         m_RtgiAtrousSets[i][2] = VK_NULL_HANDLE;
         m_PtSets[i] = VK_NULL_HANDLE;
+        m_PtRestirReuseSets[i] = VK_NULL_HANDLE;
         m_PtDenoiseSets[i] = VK_NULL_HANDLE;
         m_PtSvgfTemporalSets[i] = VK_NULL_HANDLE;
         for (int a = 0; a < 5; ++a) {
             m_PtSvgfAtrousSets[i][a] = VK_NULL_HANDLE;
+        }
+        for (int r = 0; r < 3; ++r) {
+            m_PtReblurSpatialSets[i][r] = VK_NULL_HANDLE;
         }
         m_PtSvgfModulateSets[i] = VK_NULL_HANDLE;
     }
@@ -1774,10 +2011,12 @@ bool VulkanRayTracedGI::EnsureSize(VulkanContext* context, uint32_t width, uint3
     if (!m_PtAccum.CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     if (!m_PtSpecAccum.CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     if (!m_PtAlbedo.CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
+    if (!m_PtSpecAlbedo.CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     if (!m_PtEmissive.CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
+    if (!m_PtHitDistAndDepth.CreateImage2D(context, width, height, VK_FORMAT_R32G32B32A32_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     for (int p = 0; p < 2; ++p) {
         if (!m_PtNormalRough[p].CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
-        if (!m_PtDepthInst[p].CreateImage2D(context, width, height, VK_FORMAT_R32G32B32A32_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
+        if (!m_PtDepthInst[p].CreateImage2D(context, width, height, VK_FORMAT_R32G32_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
         if (!m_PtIrradianceHistory[p].CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_LINEAR)) return false;
         if (!m_PtSpecularHistory[p].CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_LINEAR)) return false;
         if (!m_PtMomentsHistory[p].CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_LINEAR)) return false;
@@ -1787,6 +2026,15 @@ bool VulkanRayTracedGI::EnsureSize(VulkanContext* context, uint32_t width, uint3
     if (!m_PtSpecAtrousPing.CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     if (!m_PtSpecAtrousPong.CreateImage2D(context, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
     if (!m_PtMotion.CreateImage2D(context, width, height, VK_FORMAT_R16G16_SFLOAT, rwFlags, VK_IMAGE_ASPECT_COLOR_BIT, true, VK_FILTER_NEAREST)) return false;
+
+    const VkDeviceSize pixelCount = static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height);
+    const VkBufferUsageFlags resUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (!m_DiReservoirCurr.Create(context, pixelCount * 32ULL, resUsage, false, true)) return false;
+    if (!m_GiReservoirCurr.Create(context, pixelCount * 64ULL, resUsage, false, true)) return false;
+    for (int p = 0; p < 2; ++p) {
+        if (!m_DiReservoirHistory[p].Create(context, pixelCount * 32ULL, resUsage, false, true)) return false;
+        if (!m_GiReservoirHistory[p].Create(context, pixelCount * 64ULL, resUsage, false, true)) return false;
+    }
 
     m_Width = width;
     m_Height = height;
@@ -1823,14 +2071,20 @@ void VulkanRayTracedGI::DestroyTargets(VulkanContext* context) {
         m_PtAccum.Destroy(context);
         m_PtSpecAccum.Destroy(context);
         m_PtAlbedo.Destroy(context);
+        m_PtSpecAlbedo.Destroy(context);
         m_PtEmissive.Destroy(context);
+        m_PtHitDistAndDepth.Destroy(context);
         for (int p = 0; p < 2; ++p) {
             m_PtNormalRough[p].Destroy(context);
             m_PtDepthInst[p].Destroy(context);
             m_PtIrradianceHistory[p].Destroy(context);
             m_PtSpecularHistory[p].Destroy(context);
             m_PtMomentsHistory[p].Destroy(context);
+            m_DiReservoirHistory[p].Destroy(context);
+            m_GiReservoirHistory[p].Destroy(context);
         }
+        m_DiReservoirCurr.Destroy(context);
+        m_GiReservoirCurr.Destroy(context);
         m_PtAtrousPing.Destroy(context);
         m_PtAtrousPong.Destroy(context);
         m_PtSpecAtrousPing.Destroy(context);
@@ -2105,7 +2359,7 @@ bool VulkanRayTracedGI::ExecutePathTracing(
     }
 
     const uint32_t fSlot = slot % kFrameSlots;
-    const bool isRealtimeSvgf = (settings.ptMode == PathTracingMode::RealtimeSVGF);
+    const bool isRealtime = (settings.ptMode != PathTracingMode::Progressive);
     if (m_ForceReset || sceneStateHash != m_LastPtSceneHash) {
         m_PtSampleCount = 0;
         m_LastPtSceneHash = sceneStateHash;
@@ -2113,21 +2367,26 @@ bool VulkanRayTracedGI::ExecutePathTracing(
     }
 
     ++m_PtFrameIndex;
-    const uint32_t maxSamples = (!isRealtimeSvgf && settings.ptMaxSamples > 0) ? static_cast<uint32_t>(settings.ptMaxSamples) : 0u;
-    const bool holdSample = (!isRealtimeSvgf && maxSamples > 0u && m_PtSampleCount >= maxSamples);
+    const uint32_t maxSamples = (!isRealtime && settings.ptMaxSamples > 0) ? static_cast<uint32_t>(settings.ptMaxSamples) : 0u;
+    const bool holdSample = (!isRealtime && maxSamples > 0u && m_PtSampleCount >= maxSamples);
     if (!holdSample) {
         ++m_PtSampleCount;
     }
-    const bool runTrace = isRealtimeSvgf || !holdSample || !m_PtAccumInitialized;
+    const bool runTrace = isRealtime || !holdSample || !m_PtAccumInitialized;
+    const bool runRestir = isRealtime && settings.giDenoiserEnabled && (settings.restirDIEnabled || settings.restirGIEnabled);
+
+    int32_t denoiserMode = 0;
+    if (settings.ptMode == PathTracingMode::RealtimeNRD) denoiserMode = 1;
+    else if (settings.ptMode == PathTracingMode::RealtimeDLSSRR) denoiserMode = 2;
 
     GpuGiParamsUBO ubo{};
     ubo.width = m_Width;
     ubo.height = m_Height;
-    ubo.frameIndex = std::max(isRealtimeSvgf ? m_PtFrameIndex : m_PtSampleCount, 1u);
-    ubo.sampleCount = isRealtimeSvgf ? 1u : std::max(m_PtSampleCount, 1u);
-    ubo.giMode = isRealtimeSvgf ? 4 : (runTrace ? 2 : 3);
+    ubo.frameIndex = std::max(isRealtime ? m_PtFrameIndex : m_PtSampleCount, 1u);
+    ubo.sampleCount = isRealtime ? 1u : std::max(m_PtSampleCount, 1u);
+    ubo.giMode = isRealtime ? 4 : (runTrace ? 2 : 3);
     ubo.giBounces = std::clamp(settings.giBounces, 1, 8);
-    ubo.giRaysPerPixel = std::clamp(settings.giRaysPerPixel, 1, isRealtimeSvgf ? 2 : 4);
+    ubo.giRaysPerPixel = std::clamp(settings.giRaysPerPixel, 1, isRealtime ? 2 : 4);
     ubo.giIntensity = settings.giIntensity;
     ubo.giTemporalAlpha = settings.giTemporalAlpha;
     ubo.giDenoiserEnabled = settings.giDenoiserEnabled ? 1 : 0;
@@ -2137,6 +2396,10 @@ bool VulkanRayTracedGI::ExecutePathTracing(
     ubo.svgfSigmaLuminance = std::clamp(settings.svgfSigmaLuminance, 0.25f, 8.0f);
     ubo.svgfSigmaNormal = std::clamp(settings.svgfSigmaNormal, 16.0f, 512.0f);
     ubo.svgfSigmaDepth = std::clamp(settings.svgfSigmaDepth, 0.10f, 8.0f);
+    ubo.restirDIEnabled = (runRestir && settings.restirDIEnabled) ? 1 : 0;
+    ubo.restirGIEnabled = (runRestir && settings.restirGIEnabled) ? 1 : 0;
+    ubo.denoiserMode = denoiserMode;
+    ubo.specVirtualParallax = std::clamp(settings.specVirtualParallax, 0.0f, 1.0f);
     UpdateGiParamsBuffer(context, fSlot, ubo);
 
     VulkanTexture::TransitionImageLayout(cmd, hdrColorOut.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -2145,6 +2408,7 @@ bool VulkanRayTracedGI::ExecutePathTracing(
     const uint32_t groupsX = (m_Width + 7) / 8;
     const uint32_t groupsY = (m_Height + 7) / 8;
     const uint32_t currPP = m_PtPingPongIdx & 1u;
+    const uint32_t prevPP = 1u - currPP;
 
     if (runTrace) {
         const VkImageLayout prevAccumLayout = m_PtAccumInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2153,8 +2417,10 @@ bool VulkanRayTracedGI::ExecutePathTracing(
         VulkanTexture::TransitionImageLayout(cmd, m_PtAccum.GetImage(), prevAccumLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAccum.GetImage(), prevAccumLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtAlbedo.GetImage(), prevAccumLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAlbedo.GetImage(), prevAccumLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtEmissive.GetImage(), prevAccumLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtMotion.GetImage(), prevAccumLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        VulkanTexture::TransitionImageLayout(cmd, m_PtHitDistAndDepth.GetImage(), prevAccumLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtNormalRough[currPP].GetImage(), prevPPLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtDepthInst[currPP].GetImage(), prevPPLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
@@ -2172,26 +2438,34 @@ bool VulkanRayTracedGI::ExecutePathTracing(
         VkDescriptorImageInfo ptDepthInstOut{ VK_NULL_HANDLE, m_PtDepthInst[currPP].GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo ptMotionOut{ VK_NULL_HANDLE, m_PtMotion.GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo ptSpecAcc{ VK_NULL_HANDLE, m_PtSpecAccum.GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo ptHitDistDepthOut{ VK_NULL_HANDLE, m_PtHitDistAndDepth.GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo ptSpecAlbedoOut{ VK_NULL_HANDLE, m_PtSpecAlbedo.GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorBufferInfo diCurrBuf{ m_DiReservoirCurr.GetBuffer(), 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo giCurrBuf{ m_GiReservoirCurr.GetBuffer(), 0, VK_WHOLE_SIZE };
 
-        std::array<VkWriteDescriptorSet, 12> w{};
-        for (int i = 0; i < 12; ++i) {
+        std::array<VkWriteDescriptorSet, 16> w{};
+        for (int i = 0; i < 16; ++i) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = m_PtSets[fSlot];
             w[i].dstBinding = static_cast<uint32_t>(i);
             w[i].descriptorCount = 1;
         }
-        w[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                  w[0].pImageInfo  = &ptAcc;
-        w[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                  w[1].pImageInfo  = &hdrOut;
-        w[2].descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;     w[2].pNext       = &asInfo;
-        w[3].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;                 w[3].pBufferInfo = &instBuf;
-        w[4].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;                 w[4].pBufferInfo = &sceneBuf;
-        w[5].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;                 w[5].pBufferInfo = &giBuf;
-        w[6].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                  w[6].pImageInfo  = &ptNormRoughOut;
-        w[7].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                  w[7].pImageInfo  = &ptAlbedoOut;
-        w[8].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                  w[8].pImageInfo  = &ptEmissiveOut;
-        w[9].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                  w[9].pImageInfo  = &ptDepthInstOut;
-        w[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                  w[10].pImageInfo = &ptMotionOut;
-        w[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;                  w[11].pImageInfo = &ptSpecAcc;
+        w[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[0].pImageInfo  = &ptAcc;
+        w[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[1].pImageInfo  = &hdrOut;
+        w[2].descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; w[2].pNext       = &asInfo;
+        w[3].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;             w[3].pBufferInfo = &instBuf;
+        w[4].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;             w[4].pBufferInfo = &sceneBuf;
+        w[5].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;             w[5].pBufferInfo = &giBuf;
+        w[6].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[6].pImageInfo  = &ptNormRoughOut;
+        w[7].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[7].pImageInfo  = &ptAlbedoOut;
+        w[8].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[8].pImageInfo  = &ptEmissiveOut;
+        w[9].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[9].pImageInfo  = &ptDepthInstOut;
+        w[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[10].pImageInfo = &ptMotionOut;
+        w[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[11].pImageInfo = &ptSpecAcc;
+        w[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[12].pImageInfo = &ptHitDistDepthOut;
+        w[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              w[13].pImageInfo = &ptSpecAlbedoOut;
+        w[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;             w[14].pBufferInfo = &diCurrBuf;
+        w[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;             w[15].pBufferInfo = &giCurrBuf;
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(w.size()), w.data(), 0, nullptr);
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PtPipeline);
@@ -2199,13 +2473,85 @@ bool VulkanRayTracedGI::ExecutePathTracing(
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PtPipeLayout, 0, 2, ptSets.data(), 0, nullptr);
         vkCmdDispatch(cmd, groupsX, groupsY, 1);
 
-        VulkanTexture::TransitionImageLayout(cmd, m_PtAccum.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-        VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAccum.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtAlbedo.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAlbedo.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtEmissive.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtMotion.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        VulkanTexture::TransitionImageLayout(cmd, m_PtHitDistAndDepth.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtNormalRough[currPP].GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtDepthInst[currPP].GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+        // Pass 1B: Spatiotemporal ReSTIR DI + ReSTIR GI Reservoir Resampling & Shading
+        if (runRestir) {
+            if (!m_PtPingPongInitialized[prevPP]) {
+                VulkanTexture::TransitionImageLayout(cmd, m_PtNormalRough[prevPP].GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtDepthInst[prevPP].GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtIrradianceHistory[prevPP].GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecularHistory[prevPP].GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtMomentsHistory[prevPP].GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                vkCmdFillBuffer(cmd, m_DiReservoirHistory[prevPP].GetBuffer(), 0, VK_WHOLE_SIZE, 0);
+                vkCmdFillBuffer(cmd, m_GiReservoirHistory[prevPP].GetBuffer(), 0, VK_WHOLE_SIZE, 0);
+                VkMemoryBarrier fillBar{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+                fillBar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                fillBar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fillBar, 0, nullptr, 0, nullptr);
+                m_PtPingPongInitialized[prevPP] = true;
+            }
+
+            VkMemoryBarrier traceToRestir{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            traceToRestir.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            traceToRestir.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &traceToRestir, 0, nullptr, 0, nullptr);
+
+            VkDescriptorImageInfo cNrmI{ m_PtNormalRough[currPP].GetSampler(), m_PtNormalRough[currPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorImageInfo cDptI{ m_PtDepthInst[currPP].GetSampler(), m_PtDepthInst[currPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorImageInfo pNrmI{ m_PtNormalRough[prevPP].GetSampler(), m_PtNormalRough[prevPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorImageInfo pDptI{ m_PtDepthInst[prevPP].GetSampler(), m_PtDepthInst[prevPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorImageInfo motI{ m_PtMotion.GetSampler(), m_PtMotion.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorImageInfo albI{ m_PtAlbedo.GetSampler(), m_PtAlbedo.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorImageInfo hitI{ m_PtHitDistAndDepth.GetSampler(), m_PtHitDistAndDepth.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSetAccelerationStructureKHR rAsInfo{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+            rAsInfo.accelerationStructureCount = 1;
+            rAsInfo.pAccelerationStructures = &tlas;
+            VkDescriptorBufferInfo diPrevBuf{ m_DiReservoirHistory[prevPP].GetBuffer(), 0, VK_WHOLE_SIZE };
+            VkDescriptorBufferInfo diHistOutBuf{ m_DiReservoirHistory[currPP].GetBuffer(), 0, VK_WHOLE_SIZE };
+            VkDescriptorBufferInfo giPrevBuf{ m_GiReservoirHistory[prevPP].GetBuffer(), 0, VK_WHOLE_SIZE };
+            VkDescriptorBufferInfo giHistOutBuf{ m_GiReservoirHistory[currPP].GetBuffer(), 0, VK_WHOLE_SIZE };
+
+            std::array<VkWriteDescriptorSet, 18> rw{};
+            for (int i = 0; i < 18; ++i) {
+                rw[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                rw[i].dstSet = m_PtRestirReuseSets[fSlot];
+                rw[i].dstBinding = static_cast<uint32_t>(i);
+                rw[i].descriptorCount = 1;
+            }
+            rw[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;      rw[0].pImageInfo   = &cNrmI;
+            rw[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;      rw[1].pImageInfo   = &cDptI;
+            rw[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;      rw[2].pImageInfo   = &pNrmI;
+            rw[3].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;      rw[3].pImageInfo   = &pDptI;
+            rw[4].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;      rw[4].pImageInfo   = &motI;
+            rw[5].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;      rw[5].pImageInfo   = &albI;
+            rw[6].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;      rw[6].pImageInfo   = &hitI;
+            rw[7].descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;  rw[7].pNext        = &rAsInfo;
+            rw[8].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;              rw[8].pBufferInfo  = &sceneBuf;
+            rw[9].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;              rw[9].pBufferInfo  = &giBuf;
+            rw[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;              rw[10].pBufferInfo = &diCurrBuf;
+            rw[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;              rw[11].pBufferInfo = &diPrevBuf;
+            rw[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;              rw[12].pBufferInfo = &diHistOutBuf;
+            rw[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;              rw[13].pBufferInfo = &giCurrBuf;
+            rw[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;              rw[14].pBufferInfo = &giPrevBuf;
+            rw[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;              rw[15].pBufferInfo = &giHistOutBuf;
+            rw[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;               rw[16].pImageInfo  = &ptAcc;
+            rw[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;               rw[17].pImageInfo  = &ptSpecAcc;
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(rw.size()), rw.data(), 0, nullptr);
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PtRestirReusePipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PtRestirReusePipeLayout, 0, 1, &m_PtRestirReuseSets[fSlot], 0, nullptr);
+            vkCmdDispatch(cmd, groupsX, groupsY, 1);
+        }
+
+        VulkanTexture::TransitionImageLayout(cmd, m_PtAccum.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAccum.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
         VkImageMemoryBarrier hdrBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         hdrBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -2221,9 +2567,44 @@ bool VulkanRayTracedGI::ExecutePathTracing(
         m_PtAccumInitialized = true;
     }
 
-    // Pass 2: SVGF Spatiotemporal Variance-Guided Filtering (RealtimeSVGF) or Edge-Stopping Spatial Denoise (Progressive)
-    if (isRealtimeSvgf) {
-        const uint32_t prevPP = 1u - currPP;
+    // Pass 2: Realtime Reconstruction (DLSS-RR -> NRD ReBLUR -> Upgraded SVGF) or Progressive Edge-Stopping Denoise
+    if (isRealtime) {
+        if (settings.ptMode == PathTracingMode::RealtimeDLSSRR && settings.giDenoiserEnabled) {
+            DlssRayReconstructionAOVs rrAovs{};
+            rrAovs.diffuseAlbedo        = m_PtAlbedo.GetImage();
+            rrAovs.diffuseAlbedoView    = m_PtAlbedo.GetImageView();
+            rrAovs.specularAlbedo       = m_PtSpecAlbedo.GetImage();
+            rrAovs.specularAlbedoView   = m_PtSpecAlbedo.GetImageView();
+            rrAovs.normalsRoughness     = m_PtNormalRough[currPP].GetImage();
+            rrAovs.normalsRoughnessView = m_PtNormalRough[currPP].GetImageView();
+            rrAovs.linearDepth          = m_PtDepthInst[currPP].GetImage();
+            rrAovs.linearDepthView      = m_PtDepthInst[currPP].GetImageView();
+            rrAovs.motionVectors        = m_PtMotion.GetImage();
+            rrAovs.motionVectorsView    = m_PtMotion.GetImageView();
+            rrAovs.noisyDiffuse         = m_PtAccum.GetImage();
+            rrAovs.noisyDiffuseView     = m_PtAccum.GetImageView();
+            rrAovs.noisySpecular        = m_PtSpecAccum.GetImage();
+            rrAovs.noisySpecularView    = m_PtSpecAccum.GetImageView();
+            rrAovs.hitDistance          = m_PtHitDistAndDepth.GetImage();
+            rrAovs.hitDistanceView      = m_PtHitDistAndDepth.GetImageView();
+            rrAovs.colorOut             = hdrColorOut.GetImage();
+            rrAovs.colorOutView         = hdrColorOut.GetImageView();
+            rrAovs.renderWidth          = m_Width;
+            rrAovs.renderHeight         = m_Height;
+            rrAovs.outputWidth          = m_Width;
+            rrAovs.outputHeight         = m_Height;
+            rrAovs.frameIndex           = m_PtFrameIndex;
+            rrAovs.qualityMode          = settings.dlssQualityMode;
+            rrAovs.resetHistory         = (m_PtFrameIndex <= 1u);
+            if (VulkanStreamline::Get().EvaluateRayReconstruction(cmd, rrAovs)) {
+                m_PtLastWrittenIdx = currPP;
+                if (runTrace) m_PtPingPongIdx = 1u - currPP;
+                return true;
+            }
+        }
+
+        const bool useReblur = (settings.ptMode == PathTracingMode::RealtimeNRD || settings.ptMode == PathTracingMode::RealtimeDLSSRR);
+
         if (!m_PtPingPongInitialized[prevPP]) {
             VulkanTexture::TransitionImageLayout(cmd, m_PtNormalRough[prevPP].GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
             VulkanTexture::TransitionImageLayout(cmd, m_PtDepthInst[prevPP].GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -2238,7 +2619,7 @@ bool VulkanRayTracedGI::ExecutePathTracing(
         VulkanTexture::TransitionImageLayout(cmd, m_PtSpecularHistory[currPP].GetImage(), prevCurrHistLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
         VulkanTexture::TransitionImageLayout(cmd, m_PtMomentsHistory[currPP].GetImage(), prevCurrHistLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
-        // Pass 2A: SVGF Dual Temporal Reprojection (DiffuseIrradiance + SpecularRadiance) + Moments (mu1, mu2, historyLength, specMu1)
+        // Pass 2A: Temporal Reprojection (NRD ReBLUR Hit-Distance + Fast-History OR Upgraded SVGF + Virtual Specular)
         {
             VkDescriptorImageInfo rawIrrI{ m_PtAccum.GetSampler(), m_PtAccum.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkDescriptorImageInfo currNrmI{ m_PtNormalRough[currPP].GetSampler(), m_PtNormalRough[currPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -2254,9 +2635,11 @@ bool VulkanRayTracedGI::ExecutePathTracing(
             VkDescriptorImageInfo rawSpecI{ m_PtSpecAccum.GetSampler(), m_PtSpecAccum.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkDescriptorImageInfo prevSpecI{ m_PtSpecularHistory[prevPP].GetSampler(), m_PtSpecularHistory[prevPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkDescriptorImageInfo currSpecO{ VK_NULL_HANDLE, m_PtSpecularHistory[currPP].GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorImageInfo hitDistI{ m_PtHitDistAndDepth.GetSampler(), m_PtHitDistAndDepth.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorBufferInfo sceneBuf{ lightingUboBuffer, 0, VK_WHOLE_SIZE };
 
-            std::array<VkWriteDescriptorSet, 14> tw{};
-            for (int i = 0; i < 14; ++i) {
+            std::array<VkWriteDescriptorSet, 16> tw{};
+            for (int i = 0; i < 16; ++i) {
                 tw[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 tw[i].dstSet = m_PtSvgfTemporalSets[fSlot];
                 tw[i].dstBinding = static_cast<uint32_t>(i);
@@ -2276,9 +2659,11 @@ bool VulkanRayTracedGI::ExecutePathTracing(
             tw[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; tw[11].pImageInfo  = &rawSpecI;
             tw[12].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; tw[12].pImageInfo  = &prevSpecI;
             tw[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          tw[13].pImageInfo  = &currSpecO;
+            tw[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; tw[14].pImageInfo  = &hitDistI;
+            tw[15].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         tw[15].pBufferInfo = &sceneBuf;
             vkUpdateDescriptorSets(device, static_cast<uint32_t>(tw.size()), tw.data(), 0, nullptr);
 
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PtSvgfTemporalPipeline);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, useReblur ? m_PtReblurTemporalPipeline : m_PtSvgfTemporalPipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PtSvgfTemporalPipeLayout, 0, 1, &m_PtSvgfTemporalSets[fSlot], 0, nullptr);
             vkCmdDispatch(cmd, groupsX, groupsY, 1);
         }
@@ -2288,7 +2673,87 @@ bool VulkanRayTracedGI::ExecutePathTracing(
         VulkanTexture::TransitionImageLayout(cmd, m_PtMomentsHistory[currPP].GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
         m_PtPingPongInitialized[currPP] = true;
 
-        // Pass 2B: SVGF Spatial Variance (for historyLength < 4) + Dynamic 1..5 Iteration Variance-Guided A-Trous Wavelet (default 3)
+        if (useReblur) {
+            // Pass 2B (NRD ReBLUR): Hit-Distance & 3D Plane-Distance Guided Rotated Poisson Recurrent Spatial Blur
+            auto runReblurSpatial = [&](VkDescriptorSet rSet, const VulkanTexture& diffIn, const VulkanTexture& specIn, const VulkanTexture& diffOut, const VulkanTexture& specOut, int32_t passIndex, float radiusScale) {
+                VkDescriptorImageInfo dIn{ diffIn.GetSampler(), diffIn.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                VkDescriptorImageInfo mIn{ m_PtMomentsHistory[currPP].GetSampler(), m_PtMomentsHistory[currPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                VkDescriptorImageInfo nIn{ m_PtNormalRough[currPP].GetSampler(), m_PtNormalRough[currPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                VkDescriptorImageInfo zIn{ m_PtDepthInst[currPP].GetSampler(), m_PtDepthInst[currPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                VkDescriptorImageInfo hIn{ m_PtHitDistAndDepth.GetSampler(), m_PtHitDistAndDepth.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                VkDescriptorBufferInfo sceneBuf{ lightingUboBuffer, 0, VK_WHOLE_SIZE };
+                VkDescriptorImageInfo dOut{ VK_NULL_HANDLE, diffOut.GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+                VkDescriptorBufferInfo giBuf{ m_GiParamsUBOs[fSlot].GetBuffer(), 0, sizeof(GpuGiParamsUBO) };
+                VkDescriptorImageInfo sIn{ specIn.GetSampler(), specIn.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                VkDescriptorImageInfo sOut{ VK_NULL_HANDLE, specOut.GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+
+                std::array<VkWriteDescriptorSet, 10> rw{};
+                for (int i = 0; i < 10; ++i) {
+                    rw[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    rw[i].dstSet = rSet;
+                    rw[i].dstBinding = static_cast<uint32_t>(i);
+                    rw[i].descriptorCount = 1;
+                }
+                rw[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rw[0].pImageInfo  = &dIn;
+                rw[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rw[1].pImageInfo  = &mIn;
+                rw[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rw[2].pImageInfo  = &nIn;
+                rw[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rw[3].pImageInfo  = &zIn;
+                rw[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rw[4].pImageInfo  = &hIn;
+                rw[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         rw[5].pBufferInfo = &sceneBuf;
+                rw[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          rw[6].pImageInfo  = &dOut;
+                rw[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         rw[7].pBufferInfo = &giBuf;
+                rw[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rw[8].pImageInfo  = &sIn;
+                rw[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          rw[9].pImageInfo  = &sOut;
+                vkUpdateDescriptorSets(device, static_cast<uint32_t>(rw.size()), rw.data(), 0, nullptr);
+
+                struct { int32_t passIdx; float radScale; } pcData{ passIndex, radiusScale };
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PtReblurSpatialPipeline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PtReblurSpatialPipeLayout, 0, 1, &rSet, 0, nullptr);
+                vkCmdPushConstants(cmd, m_PtReblurSpatialPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), &pcData);
+                vkCmdDispatch(cmd, groupsX, groupsY, 1);
+            };
+
+            if (settings.giDenoiserEnabled) {
+                // Pass 0: Recurrent stabilization blur -> Ping, then copy stabilized diffuse back to history
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPing.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAtrousPing.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                runReblurSpatial(m_PtReblurSpatialSets[fSlot][0], m_PtIrradianceHistory[currPP], m_PtSpecularHistory[currPP], m_PtAtrousPing, m_PtSpecAtrousPing, 0, 4.0f);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPing.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAtrousPing.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtIrradianceHistory[currPP].GetImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VkImageCopy histCopy{};
+                histCopy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                histCopy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                histCopy.extent = { m_Width, m_Height, 1 };
+                vkCmdCopyImage(cmd, m_PtAtrousPing.GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_PtIrradianceHistory[currPP].GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &histCopy);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtIrradianceHistory[currPP].GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPing.GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+                // Pass 1: Wide hit-distance Poisson blur -> Pong
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPong.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAtrousPong.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                runReblurSpatial(m_PtReblurSpatialSets[fSlot][1], m_PtAtrousPing, m_PtSpecAtrousPing, m_PtAtrousPong, m_PtSpecAtrousPong, 1, 8.5f);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPong.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAtrousPong.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+                // Pass 2: Post-blur fine cleanup -> Ping
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPing.GetImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAtrousPing.GetImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                runReblurSpatial(m_PtReblurSpatialSets[fSlot][2], m_PtAtrousPong, m_PtSpecAtrousPong, m_PtAtrousPing, m_PtSpecAtrousPing, 2, 3.25f);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPing.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAtrousPing.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                m_PtAtrousFinalIdx = 0u;
+            } else {
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPong.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAtrousPong.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                runReblurSpatial(m_PtReblurSpatialSets[fSlot][0], m_PtIrradianceHistory[currPP], m_PtSpecularHistory[currPP], m_PtAtrousPong, m_PtSpecAtrousPong, 0, 0.0f);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtAtrousPong.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                VulkanTexture::TransitionImageLayout(cmd, m_PtSpecAtrousPong.GetImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                m_PtAtrousFinalIdx = 1u;
+            }
+            m_PtAtrousInitialized = true;
+        } else {
+        // Pass 2B (Upgraded SVGF): Spatial Variance (historyLength < 4) + Dynamic 1..5 Iteration Variance-Guided A-Trous Wavelet
         auto runSvgfAtrous = [&](VkDescriptorSet atrousSet, const VulkanTexture& irrVarIn, const VulkanTexture& specVarIn, const VulkanTexture& irrVarOut, const VulkanTexture& specVarOut, int32_t stepSize, int32_t isLastPass) {
             VkDescriptorImageInfo ivIn{ irrVarIn.GetSampler(), irrVarIn.GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkDescriptorImageInfo momIn{ m_PtMomentsHistory[currPP].GetSampler(), m_PtMomentsHistory[currPP].GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -2379,6 +2844,7 @@ bool VulkanRayTracedGI::ExecutePathTracing(
             m_PtAtrousFinalIdx = 1u;
         }
         m_PtAtrousInitialized = true;
+        } // end else (!useReblur)
 
         // Pass 2C: Dedicated Final Modulation & Composition: (Diffuse_Filtrado * Albedo_Original) + Specular_Filtrado + Emissive -> hdrColorOut
         {

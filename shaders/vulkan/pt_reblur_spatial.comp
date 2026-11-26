@@ -1,0 +1,205 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// NRD ReBLUR-style Hit-Distance & 3D Plane-Distance Guided Rotated Poisson Recurrent Spatial Filter
+struct GpuDirLight { vec4 directionIntensity; vec4 colorPad; };
+struct GpuPointLight { vec4 positionRange; vec4 colorIntensity; };
+struct GpuSpotLight { vec4 positionRange; vec4 directionCosOuter; vec4 colorIntensityCosIn; };
+
+layout(set = 0, binding = 0) uniform sampler2D uIrrHitIn;          // .rgb = demodulated Diffuse, .a = normDiffHitDist
+layout(set = 0, binding = 1) uniform sampler2D uMomentsIn;         // .r = fastDiffLuma, .g = mom2, .b = histLen, .a = fastSpecLuma
+layout(set = 0, binding = 2) uniform sampler2D uNormalRoughIn;     // .xyz = worldNormal, .w = roughness
+layout(set = 0, binding = 3) uniform sampler2D uDepthInstIn;       // .r = linearDepth, .g = instanceID
+layout(set = 0, binding = 4) uniform sampler2D uHitDistDepthIn;    // .r = diffHitT, .g = specHitT, .b = windowZ, .a = prevLinearDepth
+layout(set = 0, binding = 5) uniform SceneLightingUBO {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 skyZenith;
+    vec4 skyHorizon;
+    vec4 skyGround;
+    vec4 sunDirIntensity;
+    vec4 sunColorParams;
+    ivec4 counts;
+    GpuDirLight dirLights[4];
+    GpuPointLight pointLights[32];
+    GpuSpotLight spotLights[16];
+    vec4 cloudParams0;
+    vec4 cloudParams1;
+    vec4 cloudParams2;
+    vec4 cloudAmbient;
+    mat4 currViewProj;
+    mat4 prevViewProj;
+} uScene;
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D uIrrHitOut;
+layout(set = 0, binding = 7) uniform GiParamsUBO {
+    uint width;
+    uint height;
+    uint frameIndex;
+    uint sampleCount;
+    int  giMode;
+    int  giBounces;
+    int  giRaysPerPixel;
+    float giIntensity;
+    float giTemporalAlpha;
+    int  giDenoiserEnabled;
+    int  giRayTracedShadows;
+    int  hasValidTLAS;
+    int  svgfAtrousIterations;
+    float svgfSigmaLuminance;
+    float svgfSigmaNormal;
+    float svgfSigmaDepth;
+    int  restirDIEnabled;
+    int  restirGIEnabled;
+    int  denoiserMode;
+    float specVirtualParallax;
+} uGi;
+layout(set = 0, binding = 8) uniform sampler2D uSpecHitIn;         // .rgb = SpecularRadiance, .a = normSpecHitDist
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D uSpecHitOut;
+
+layout(push_constant) uniform ReblurPC {
+    int passIndex;   // 0 = pre-blur / recurrent stabilization, 1 = wide blur, 2 = post-blur
+    float radiusScale;
+} pc;
+
+float Luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 ReconstructWorldPos(vec2 uv, float windowZ) {
+    vec4 w = uScene.invViewProj * vec4(uv * 2.0 - 1.0, windowZ, 1.0);
+    return w.xyz / max(abs(w.w), 1e-6);
+}
+
+const vec2 kPoisson8[8] = vec2[8](
+    vec2(-0.4835, -0.2361),
+    vec2( 0.2588, -0.4659),
+    vec2(-0.1812,  0.5112),
+    vec2( 0.5321,  0.1945),
+    vec2(-0.8412,  0.3421),
+    vec2( 0.7934, -0.4981),
+    vec2(-0.3125, -0.8924),
+    vec2( 0.2419,  0.9102)
+);
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uIrrHitOut);
+    if (pix.x >= size.x || pix.y >= size.y) return;
+
+    vec4 centerDiff = texelFetch(uIrrHitIn, pix, 0);
+    if (any(isnan(centerDiff)) || any(isinf(centerDiff))) centerDiff = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 centerSpec = texelFetch(uSpecHitIn, pix, 0);
+    if (any(isnan(centerSpec)) || any(isinf(centerSpec))) centerSpec = vec4(0.0, 0.0, 0.0, 1.0);
+
+    vec2 centerDI = texelFetch(uDepthInstIn, pix, 0).rg;
+    float centerDepth = centerDI.x;
+    float centerInst  = centerDI.y;
+    if (centerDepth <= 0.0001 || uGi.giDenoiserEnabled == 0 || pc.radiusScale <= 0.0) {
+        imageStore(uIrrHitOut, pix, centerDiff);
+        imageStore(uSpecHitOut, pix, centerSpec);
+        return;
+    }
+
+    vec4 centerNR = texelFetch(uNormalRoughIn, pix, 0);
+    vec3 centerN = normalize(centerNR.xyz);
+    float centerRough = clamp(centerNR.w, 0.04, 1.0);
+    float histLen = max(texelFetch(uMomentsIn, pix, 0).b, 1.0);
+    float windowZ = clamp(texelFetch(uHitDistDepthIn, pix, 0).b, 0.0, 1.0);
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    vec3 centerPos = ReconstructWorldPos(uv, windowZ);
+
+    // Hit-distance driven kernel radius:
+    // Near contact shadows (normHitDist -> 0), blur radius shrinks toward ~1px to preserve crisp contact AO/shadows!
+    float diffNormHit = clamp(centerDiff.a, 0.0, 1.0);
+    float specNormHit = clamp(centerSpec.a, 0.0, 1.0);
+    float histBoost   = mix(2.15, 1.0, clamp((histLen - 1.0) / 6.0, 0.0, 1.0));
+
+    float diffRadius = pc.radiusScale * histBoost * mix(0.22, 1.0, sqrt(diffNormHit));
+    bool filterSpec  = (centerRough >= 0.14);
+    float specLobe   = smoothstep(0.14, 0.65, centerRough);
+    float specRadius = filterSpec ? (pc.radiusScale * histBoost * specLobe * mix(0.20, 1.0, sqrt(specNormHit))) : 0.0;
+
+    // Blue-noise per-pixel rotation angle decorrelated across passes
+    float angle = 6.2831853 * fract(52.9829189 * fract(dot(vec2(pix), vec2(0.06711056, 0.00583715)) + 0.381966 * float(pc.passIndex) + 0.754877 * float(uGi.frameIndex & 63u)));
+    mat2 rot = mat2(cos(angle), -sin(angle), sin(angle), cos(angle));
+
+    float planeTol = max(0.012 * centerDepth * clamp(uGi.svgfSigmaDepth, 0.25, 4.0), 1e-3);
+    float normalExp = clamp(uGi.svgfSigmaNormal, 32.0, 512.0);
+    float centerDiffLuma = Luminance(centerDiff.rgb);
+    float centerSpecLuma = Luminance(centerSpec.rgb);
+    float lumaScaleDiff = clamp(uGi.svgfSigmaLuminance, 0.5, 6.0) * histBoost * (0.25 + 0.55 * centerDiffLuma);
+    float lumaScaleSpec = clamp(uGi.svgfSigmaLuminance, 0.5, 6.0) * specLobe * (0.20 + 0.60 * centerSpecLuma);
+
+    vec4 sumDiff = centerDiff;
+    float wDiffSum = 1.0;
+
+    vec4 sumSpec = centerSpec;
+    float wSpecSum = 1.0;
+
+    for (int i = 0; i < 8; ++i) {
+        vec2 unitTap = rot * kPoisson8[i];
+
+        // Diffuse tap at hit-distance-scaled radius
+        if (diffRadius > 0.5) {
+            ivec2 qD = pix + ivec2(round(unitTap * diffRadius));
+            if (qD.x >= 0 && qD.y >= 0 && qD.x < size.x && qD.y < size.y && qD != pix) {
+                vec2 qDI = texelFetch(uDepthInstIn, qD, 0).rg;
+                if (qDI.x > 0.0001 && abs(centerInst - qDI.y) <= 0.5) {
+                    vec3 qN = normalize(texelFetch(uNormalRoughIn, qD, 0).xyz);
+                    float wN = pow(max(dot(centerN, qN), 0.0), normalExp);
+                    if (wN > 1e-4) {
+                        float qWinZ = clamp(texelFetch(uHitDistDepthIn, qD, 0).b, 0.0, 1.0);
+                        vec3 qPos = ReconstructWorldPos((vec2(qD) + 0.5) / vec2(size), qWinZ);
+                        // 3D Plane-distance weight (grazing-angle invariant!)
+                        float planeDist = abs(dot(qPos - centerPos, centerN));
+                        float wPlane = exp(-planeDist / planeTol);
+                        vec4 sDiff = texelFetch(uIrrHitIn, qD, 0);
+                        if (!any(isnan(sDiff)) && !any(isinf(sDiff)) && wPlane > 1e-4) {
+                            // Hit-distance bilateral weight prevents smearing sharp contact shadows into lit regions
+                            float wHit = exp(-abs(diffNormHit - sDiff.a) / max(0.25 + 0.35 * diffNormHit, 0.1));
+                            float wLuma = exp(-abs(centerDiffLuma - Luminance(sDiff.rgb)) / max(lumaScaleDiff, 0.05));
+                            float w = wN * wPlane * wHit * wLuma;
+                            sumDiff += max(sDiff, vec4(0.0)) * w;
+                            wDiffSum += w;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Specular tap at GGX-lobe + hit-distance-scaled radius
+        if (filterSpec && specRadius > 0.5) {
+            ivec2 qS = pix + ivec2(round(unitTap * specRadius));
+            if (qS.x >= 0 && qS.y >= 0 && qS.x < size.x && qS.y < size.y && qS != pix) {
+                vec2 qDI = texelFetch(uDepthInstIn, qS, 0).rg;
+                if (qDI.x > 0.0001 && abs(centerInst - qDI.y) <= 0.5) {
+                    vec4 qNR = texelFetch(uNormalRoughIn, qS, 0);
+                    vec3 qN = normalize(qNR.xyz);
+                    float qRough = clamp(qNR.w, 0.04, 1.0);
+                    float wN = pow(max(dot(centerN, qN), 0.0), mix(384.0, 128.0, specLobe));
+                    float wRough = exp(-abs(centerRough - qRough) / max(0.06 * centerRough + 0.015, 0.01));
+                    if (wN * wRough > 1e-4) {
+                        float qWinZ = clamp(texelFetch(uHitDistDepthIn, qS, 0).b, 0.0, 1.0);
+                        vec3 qPos = ReconstructWorldPos((vec2(qS) + 0.5) / vec2(size), qWinZ);
+                        float planeDist = abs(dot(qPos - centerPos, centerN));
+                        float wPlane = exp(-planeDist / planeTol);
+                        vec4 sSpec = texelFetch(uSpecHitIn, qS, 0);
+                        if (!any(isnan(sSpec)) && !any(isinf(sSpec)) && wPlane > 1e-4) {
+                            float wLuma = exp(-abs(centerSpecLuma - Luminance(sSpec.rgb)) / max(lumaScaleSpec, 0.04));
+                            float w = wN * wRough * wPlane * wLuma;
+                            sumSpec += max(sSpec, vec4(0.0)) * w;
+                            wSpecSum += w;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    vec4 outDiff = sumDiff / max(wDiffSum, 1e-4);
+    vec4 outSpec = filterSpec ? (sumSpec / max(wSpecSum, 1e-4)) : centerSpec;
+
+    imageStore(uIrrHitOut, pix, max(outDiff, vec4(0.0)));
+    imageStore(uSpecHitOut, pix, max(outSpec, vec4(0.0)));
+}

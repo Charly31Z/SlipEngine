@@ -234,6 +234,27 @@ else()
             GPUOpen::VulkanMemoryAllocator
             unofficial::shaderc::shaderc
         )
+
+        # Soporte opcional para SDK de NVIDIA Streamline (DLSS + Ray Reconstruction) y NVIDIA NRD
+        set(SLIP_STREAMLINE_SDK_DIR "" CACHE PATH "Ruta opcional al SDK de NVIDIA Streamline (DLSS Ray Reconstruction)")
+        if(SLIP_STREAMLINE_SDK_DIR AND EXISTS "${SLIP_STREAMLINE_SDK_DIR}/include/sl.h")
+            message(STATUS "[SlipEngine] NVIDIA Streamline SDK detectado en: ${SLIP_STREAMLINE_SDK_DIR}")
+            target_include_directories(SlipEngine PRIVATE "${SLIP_STREAMLINE_SDK_DIR}/include")
+            target_compile_definitions(SlipEngine PRIVATE
+                SLIP_HAS_STREAMLINE_SDK=1
+                SLIP_STREAMLINE_BIN_DIR="${SLIP_STREAMLINE_SDK_DIR}/bin/x64"
+            )
+            if(EXISTS "${SLIP_STREAMLINE_SDK_DIR}/lib/x64/sl.interposer.lib")
+                target_link_libraries(SlipEngine PRIVATE "${SLIP_STREAMLINE_SDK_DIR}/lib/x64/sl.interposer.lib")
+            endif()
+        endif()
+
+        set(SLIP_NRD_SDK_DIR "" CACHE PATH "Ruta opcional al SDK precompilado de NVIDIA NRD")
+        if(SLIP_NRD_SDK_DIR AND EXISTS "${SLIP_NRD_SDK_DIR}/Include/NRD.h")
+            message(STATUS "[SlipEngine] NVIDIA NRD SDK detectado en: ${SLIP_NRD_SDK_DIR}")
+            target_include_directories(SlipEngine PRIVATE "${SLIP_NRD_SDK_DIR}/Include")
+            target_compile_definitions(SlipEngine PRIVATE SLIP_HAS_NRD_SDK=1)
+        endif()
     endif()
 
     # 2. Ejecutable Runner de escritorio (SlipRunner.exe)

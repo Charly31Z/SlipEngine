@@ -23,7 +23,7 @@ struct alignas(16) SLIPENGINE_API GpuGiParamsUBO {
     uint32_t height = 0;
     uint32_t frameIndex = 0;
     uint32_t sampleCount = 1;
-    int32_t  giMode = 1;           // 0=Off, 1=RTGI, 2=PT Progressive, 3=PT Hold, 4=PT Realtime SVGF
+    int32_t  giMode = 1;           // 0=Off, 1=RTGI, 2=PT Progressive, 3=PT Hold, 4=PT Realtime
     int32_t  giBounces = 2;
     int32_t  giRaysPerPixel = 1;
     float    giIntensity = 1.0f;
@@ -35,8 +35,12 @@ struct alignas(16) SLIPENGINE_API GpuGiParamsUBO {
     float    svgfSigmaLuminance = 2.0f;
     float    svgfSigmaNormal = 128.0f;
     float    svgfSigmaDepth = 1.5f;
+    int32_t  restirDIEnabled = 1;
+    int32_t  restirGIEnabled = 1;
+    int32_t  denoiserMode = 0;     // 0=SVGF, 1=NRD_ReBLUR, 2=DLSS_RR
+    float    specVirtualParallax = 1.0f;
 };
-static_assert(sizeof(GpuGiParamsUBO) == 64, "GpuGiParamsUBO must be 64 bytes (4 x vec4)");
+static_assert(sizeof(GpuGiParamsUBO) == 80, "GpuGiParamsUBO must be 80 bytes (5 x vec4)");
 
 class SLIPENGINE_API VulkanRayTracedGI {
 public:
@@ -95,9 +99,11 @@ public:
     const VulkanTexture& GetPtDemodIrradiance() const { return m_PtAccum; }
     const VulkanTexture& GetPtSpecularRadiance() const { return m_PtSpecAccum; }
     const VulkanTexture& GetPtAlbedo() const { return m_PtAlbedo; }
+    const VulkanTexture& GetPtSpecAlbedo() const { return m_PtSpecAlbedo; }
     const VulkanTexture& GetPtEmissive() const { return m_PtEmissive; }
     const VulkanTexture& GetPtNormalRough(uint32_t idx) const { return m_PtNormalRough[idx & 1u]; }
     const VulkanTexture& GetPtDepthInst(uint32_t idx) const { return m_PtDepthInst[idx & 1u]; }
+    const VulkanTexture& GetPtHitDistAndDepth() const { return m_PtHitDistAndDepth; }
     const VulkanTexture& GetPtMotion() const { return m_PtMotion; }
     const VulkanTexture& GetPtIrradianceHistory(uint32_t idx) const { return m_PtIrradianceHistory[idx & 1u]; }
     const VulkanTexture& GetPtSpecularHistory(uint32_t idx) const { return m_PtSpecularHistory[idx & 1u]; }
@@ -121,9 +127,11 @@ private:
     VulkanTexture m_PtAccum;
     VulkanTexture m_PtSpecAccum;
     VulkanTexture m_PtAlbedo;
+    VulkanTexture m_PtSpecAlbedo;
     VulkanTexture m_PtEmissive;
     VulkanTexture m_PtNormalRough[2];
     VulkanTexture m_PtDepthInst[2];
+    VulkanTexture m_PtHitDistAndDepth;
     VulkanTexture m_PtIrradianceHistory[2];
     VulkanTexture m_PtSpecularHistory[2];
     VulkanTexture m_PtMomentsHistory[2];
@@ -134,6 +142,12 @@ private:
     VulkanTexture m_PtMotion;
     VulkanTexture m_FallbackGI;
     VulkanTexture m_FallbackRefl;
+
+    // ReSTIR DI & ReSTIR GI GPU Reservoir buffers (ping-pong temporal history + current frame)
+    VulkanBuffer m_DiReservoirCurr;
+    VulkanBuffer m_DiReservoirHistory[2];
+    VulkanBuffer m_GiReservoirCurr;
+    VulkanBuffer m_GiReservoirHistory[2];
 
     uint32_t m_Width = 0;
     uint32_t m_Height = 0;
@@ -161,18 +175,22 @@ private:
     VkDescriptorSetLayout m_RtgiDenoiseLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_RtgiAtrousLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_PtLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_PtRestirReuseLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_PtDenoiseLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_PtSvgfTemporalLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_PtSvgfAtrousLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_PtReblurSpatialLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_PtSvgfModulateLayout = VK_NULL_HANDLE;
 
     VkDescriptorSet m_RtgiTraceSets[kFrameSlots]{};
     VkDescriptorSet m_RtgiDenoiseSets[kFrameSlots]{};
     VkDescriptorSet m_RtgiAtrousSets[kFrameSlots][3]{};
     VkDescriptorSet m_PtSets[kFrameSlots]{};
+    VkDescriptorSet m_PtRestirReuseSets[kFrameSlots]{};
     VkDescriptorSet m_PtDenoiseSets[kFrameSlots]{};
     VkDescriptorSet m_PtSvgfTemporalSets[kFrameSlots]{};
     VkDescriptorSet m_PtSvgfAtrousSets[kFrameSlots][5]{};
+    VkDescriptorSet m_PtReblurSpatialSets[kFrameSlots][3]{};
     VkDescriptorSet m_PtSvgfModulateSets[kFrameSlots]{};
 
     VkPipelineLayout m_RtgiTracePipeLayout = VK_NULL_HANDLE;
@@ -187,14 +205,21 @@ private:
     VkPipelineLayout m_PtPipeLayout = VK_NULL_HANDLE;
     VkPipeline m_PtPipeline = VK_NULL_HANDLE;
 
+    VkPipelineLayout m_PtRestirReusePipeLayout = VK_NULL_HANDLE;
+    VkPipeline m_PtRestirReusePipeline = VK_NULL_HANDLE;
+
     VkPipelineLayout m_PtDenoisePipeLayout = VK_NULL_HANDLE;
     VkPipeline m_PtDenoisePipeline = VK_NULL_HANDLE;
 
     VkPipelineLayout m_PtSvgfTemporalPipeLayout = VK_NULL_HANDLE;
     VkPipeline m_PtSvgfTemporalPipeline = VK_NULL_HANDLE;
+    VkPipeline m_PtReblurTemporalPipeline = VK_NULL_HANDLE;
 
     VkPipelineLayout m_PtSvgfAtrousPipeLayout = VK_NULL_HANDLE;
     VkPipeline m_PtSvgfAtrousPipeline = VK_NULL_HANDLE;
+
+    VkPipelineLayout m_PtReblurSpatialPipeLayout = VK_NULL_HANDLE;
+    VkPipeline m_PtReblurSpatialPipeline = VK_NULL_HANDLE;
 
     VkPipelineLayout m_PtSvgfModulatePipeLayout = VK_NULL_HANDLE;
     VkPipeline m_PtSvgfModulatePipeline = VK_NULL_HANDLE;

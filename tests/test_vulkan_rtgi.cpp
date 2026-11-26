@@ -2,6 +2,7 @@
 #include "SlipEngine/render/SlipGraphicsSettings.h"
 #include "SlipEngine/render/vulkan/VulkanRHI.h"
 #include "SlipEngine/render/vulkan/VulkanSceneRenderer.h"
+#include "SlipEngine/render/vulkan/VulkanStreamline.h"
 #include "SlipEngine/render/vulkan/VulkanBuffer.h"
 #include "SlipEngine/render/vulkan/VulkanTexture.h"
 #include "SlipEngine/render/SlipMesh.h"
@@ -990,6 +991,161 @@ int main() {
                 return 1;
             }
             renderer->InvalidateSceneCache();
+        }
+
+        // 13. ReSTIR DI + ReSTIR GI (Paso 3): Multi-Light Cyberpunk-style rig (12 Point Lights + Sun) at 1 SPP
+        {
+            SlipLevel restirLevel;
+            restirLevel.AddEntity(CreateBoxEntity("RFloor", glm::vec3(0.0f, -1.8f, 0.0f), glm::vec3(8.0f, 0.2f, 8.0f), glm::vec3(0.75f, 0.75f, 0.78f), 0.22f, 0.1f));
+            restirLevel.AddEntity(CreateBoxEntity("RBack",  glm::vec3(0.0f,  0.5f, -3.2f), glm::vec3(8.0f, 5.0f, 0.2f), glm::vec3(0.82f, 0.82f, 0.82f), 0.75f, 0.0f));
+            restirLevel.AddEntity(CreateBoxEntity("RPillar", glm::vec3(0.0f, -0.5f, -1.2f), glm::vec3(0.8f, 2.4f, 0.8f), glm::vec3(0.85f, 0.25f, 0.20f), 0.55f, 0.0f));
+
+            for (int li = 0; li < 12; ++li) {
+                float ang = static_cast<float>(li) * (6.2831853f / 12.0f);
+                SlipEntity* lEnt = new SlipEntity("NeonLight_" + std::to_string(li));
+                SetEntityTransform(lEnt, glm::vec3(std::cos(ang) * 2.4f, 0.6f + 0.3f * std::sin(ang * 2.0f), -1.0f + std::sin(ang) * 1.8f));
+                auto plc = lEnt->AddComponent<LightComponent>(LightType::Point);
+                plc->color = (li % 2 == 0) ? glm::vec3(0.2f, 0.85f, 1.0f) : glm::vec3(1.0f, 0.30f, 0.75f);
+                plc->intensity = 1.6f;
+                plc->range = 8.0f;
+                restirLevel.AddEntity(lEnt);
+            }
+
+            gfx.giMode = GlobalIlluminationMode::PathTracing;
+            gfx.ptMode = PathTracingMode::RealtimeSVGF;
+            gfx.giBounces = 3;
+            gfx.giRaysPerPixel = 1;
+            gfx.restirDIEnabled = true;
+            gfx.restirGIEnabled = true;
+            gfx.giDenoiserEnabled = true;
+            renderer->ResetPathTracingAccumulation();
+
+            std::vector<uint8_t> pixelsRestirOn, pixelsRestirRaw;
+            if (!RenderAndReadback(ctx, renderer, &restirLevel, view, proj, eye, W, H, 6, outTex, staging, pixelsRestirOn)) {
+                std::cerr << "[FAIL] Case 13a ReSTIR DI+GI render fallo." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
+
+            gfx.giDenoiserEnabled = false;
+            if (!RenderAndReadback(ctx, renderer, &restirLevel, view, proj, eye, W, H, 1, outTex, staging, pixelsRestirRaw)) {
+                std::cerr << "[FAIL] Case 13b raw 1-SPP render fallo." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
+            gfx.giDenoiserEnabled = true;
+
+            glm::vec3 restirWall = SampleRegionAvg(pixelsRestirOn, W, H, W / 2, static_cast<uint32_t>(H * 0.25f), 8);
+            float restirStd = computePatchStdDev(pixelsRestirOn, W / 2, static_cast<uint32_t>(H * 0.25f), 8);
+            float rawMultiStd = computePatchStdDev(pixelsRestirRaw, W / 2, static_cast<uint32_t>(H * 0.25f), 8);
+            std::cout << "[INFO] Case 13 (Paso 3 ReSTIR DI + ReSTIR GI, 12 Lights @ 1 SPP)"
+                      << " WallRGB=(" << restirWall.r << "," << restirWall.g << "," << restirWall.b << ")"
+                      << " PatchStdDev(Raw=" << rawMultiStd << " -> ReSTIR+SVGF=" << restirStd << ")" << std::endl;
+
+            if ((restirWall.r + restirWall.g + restirWall.b) < 25.0f || restirStd > rawMultiStd) {
+                std::cerr << "[FAIL] Case 13 verificacion ReSTIR DI + GI fallida." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
+            renderer->InvalidateSceneCache();
+        }
+
+        // 14. NRD ReBLUR Hit-Distance Denoiser (Paso 2) + Virtual Specular Reprojection under camera pan
+        {
+            gfx.giMode = GlobalIlluminationMode::PathTracing;
+            gfx.ptMode = PathTracingMode::RealtimeNRD;
+            gfx.giBounces = 3;
+            gfx.giRaysPerPixel = 1;
+            gfx.restirDIEnabled = true;
+            gfx.restirGIEnabled = true;
+            gfx.giDenoiserEnabled = true;
+            gfx.specVirtualParallax = 1.0f;
+            renderer->ResetPathTracingAccumulation();
+
+            std::vector<uint8_t> pixelsReblurStat, pixelsReblurPan;
+            if (!RenderAndReadback(ctx, renderer, &boxLevel, view, proj, eye, W, H, 6, outTex, staging, pixelsReblurStat)) {
+                std::cerr << "[FAIL] Case 14a RealtimeNRD (ReBLUR) stationary fallo." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
+            glm::vec3 panEyeNrd = eye + glm::vec3(0.25f, 0.0f, -0.15f);
+            glm::mat4 panViewNrd = glm::lookAt(panEyeNrd, glm::vec3(0.10f, 0.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            if (!RenderAndReadback(ctx, renderer, &boxLevel, panViewNrd, proj, panEyeNrd, W, H, 2, outTex, staging, pixelsReblurPan)) {
+                std::cerr << "[FAIL] Case 14b RealtimeNRD (ReBLUR) camera pan fallo." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
+
+            float reblurStd = computePatchStdDev(pixelsReblurStat, W / 2, H / 2, 10);
+            glm::vec3 reblurRed = SampleRegionAvg(pixelsReblurStat, W, H, static_cast<uint32_t>(W * 0.08f), H / 2, 4);
+            glm::vec3 reblurPanC = SampleRegionAvg(pixelsReblurPan, W, H, W / 2, H / 2, 6);
+            std::cout << "[INFO] Case 14 (Paso 2 NRD ReBLUR Hit-Distance + Fast-History Anti-Lag)"
+                      << " RedWall=(" << reblurRed.r << "," << reblurRed.g << "," << reblurRed.b << ")"
+                      << " PanCenter=(" << reblurPanC.r << "," << reblurPanC.g << "," << reblurPanC.b << ")"
+                      << " BackWallStdDev=" << reblurStd << std::endl;
+
+            if (reblurRed.r <= reblurRed.b * 1.5f || (reblurPanC.r + reblurPanC.g + reblurPanC.b) < 20.0f || reblurStd >= rawNoiseStd) {
+                std::cerr << "[FAIL] Case 14 verificacion NRD ReBLUR fallida." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
+        }
+
+        // 15. DLSS + Ray Reconstruction AOVs & Streamline Bridge (Paso 4)
+        {
+            gfx.giMode = GlobalIlluminationMode::PathTracing;
+            gfx.ptMode = PathTracingMode::RealtimeDLSSRR;
+            gfx.dlssQualityMode = 1;
+            renderer->ResetPathTracingAccumulation();
+
+            std::vector<uint8_t> pixelsDlssRR;
+            if (!RenderAndReadback(ctx, renderer, &boxLevel, view, proj, eye, W, H, 3, outTex, staging, pixelsDlssRR)) {
+                std::cerr << "[FAIL] Case 15 RealtimeDLSSRR render fallo." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
+
+            std::vector<uint8_t> hitDistRaw, specAlbedoRaw;
+            if (!readbackImageBytes(rtGi.GetPtHitDistAndDepth(), static_cast<VkDeviceSize>(W) * H * 16ULL, hitDistRaw) ||
+                !readbackImageBytes(rtGi.GetPtSpecAlbedo(), static_cast<VkDeviceSize>(W) * H * 8ULL, specAlbedoRaw))
+            {
+                std::cerr << "[FAIL] Case 15 readback DLSS-RR AOV buffers fallo." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
+
+            const float* hdF = reinterpret_cast<const float*>(hitDistRaw.data());
+            float cDiffHitT = hdF[centerPixIdx * 4 + 0];
+            float cSpecHitT = hdF[centerPixIdx * 4 + 1];
+            float cWinZ     = hdF[centerPixIdx * 4 + 2];
+            float cPrevLinZ = hdF[centerPixIdx * 4 + 3];
+
+            const uint16_t* sa16 = reinterpret_cast<const uint16_t*>(specAlbedoRaw.data());
+            glm::vec3 cSpecAlb(
+                halfToFloat(sa16[centerPixIdx * 4 + 0]),
+                halfToFloat(sa16[centerPixIdx * 4 + 1]),
+                halfToFloat(sa16[centerPixIdx * 4 + 2])
+            );
+            glm::vec2 jitter1 = VulkanStreamline::ComputeHaltonJitterPixels(1u, 16u);
+            glm::vec2 jitter2 = VulkanStreamline::ComputeHaltonJitterPixels(2u, 16u);
+            glm::vec3 rrCenter = SampleRegionAvg(pixelsDlssRR, W, H, W / 2, H / 2, 6);
+
+            std::cout << "[INFO] Case 15 (Paso 4 DLSS-RR AOVs + Streamline)"
+                      << " NvidiaRTX=" << (VulkanStreamline::Get().IsNvidiaRTXDetected() ? "true" : "false")
+                      << " HitDist=(diff:" << cDiffHitT << ", spec:" << cSpecHitT << ", winZ:" << cWinZ << ", prevZ:" << cPrevLinZ << ")"
+                      << " SpecAlbedo=(" << cSpecAlb.r << "," << cSpecAlb.g << "," << cSpecAlb.b << ")"
+                      << " HaltonJitter1=(" << jitter1.x << "," << jitter1.y << ")"
+                      << " CenterRGB=(" << rrCenter.r << "," << rrCenter.g << "," << rrCenter.b << ")" << std::endl;
+
+            if (cDiffHitT <= 0.0f || cWinZ <= 0.0f || cWinZ >= 1.0f || cPrevLinZ <= 1.0f ||
+                cSpecAlb.r < 0.0f || cSpecAlb.r > 1.0f ||
+                glm::length(jitter1 - jitter2) < 0.05f ||
+                (rrCenter.r + rrCenter.g + rrCenter.b) < 20.0f)
+            {
+                std::cerr << "[FAIL] Case 15 verificacion AOVs DLSS Ray Reconstruction fallida." << std::endl;
+                staging.Destroy(&ctx); outTex.Destroy(&ctx); SlipRHI::Destroy();
+                return 1;
+            }
         }
 
         gfx.giRaysPerPixel = 2;
